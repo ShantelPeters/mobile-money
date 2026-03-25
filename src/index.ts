@@ -8,6 +8,8 @@ import { errorHandler } from './middleware/errorHandler';
 import { connectRedis } from './config/redis';
 import { globalTimeout, haltOnTimedout, timeoutErrorHandler } from './middleware/timeout';
 import { responseTime } from './middleware/responseTime';
+import { createQueueDashboard } from './queue/dashboard';
+import { startJobs } from './jobs/scheduler';
 
 const app = express();
 const PORT = process.env.PORT || 3000;

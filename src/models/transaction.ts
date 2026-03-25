@@ -5,6 +5,7 @@ export enum TransactionStatus {
   Pending = 'pending',
   Completed = 'completed',
   Failed = 'failed',
+  Cancelled = 'cancelled',
 }
 
 const MAX_TAGS = 10;
