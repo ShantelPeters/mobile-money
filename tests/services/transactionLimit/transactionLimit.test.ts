@@ -1,6 +1,6 @@
 import { TransactionLimitService } from '../../../src/services/transactionLimit/transactionLimitService';
 import { KYCService } from '../../../src/services/kyc/kycService';
-import { TransactionModel } from '../../../src/models/transaction';
+import { TransactionModel, TransactionStatus } from '../../../src/models/transaction';
 import { KYCLevel } from '../../../src/config/limits';
 
 // Mock dependencies
@@ -25,7 +25,7 @@ describe('TransactionLimitService', () => {
 
       mockKycService.getUserKYCLevel.mockResolvedValue(KYCLevel.Unverified);
       mockTransactionModel.findCompletedByUserSince.mockResolvedValue([
-        { amount: '3000', status: 'completed' } as any
+        { amount: '3000', status: TransactionStatus.Completed } as any
       ]);
 
       const result = await service.checkTransactionLimit(userId, transactionAmount);
@@ -43,7 +43,7 @@ describe('TransactionLimitService', () => {
 
       mockKycService.getUserKYCLevel.mockResolvedValue(KYCLevel.Unverified);
       mockTransactionModel.findCompletedByUserSince.mockResolvedValue([
-        { amount: '5000', status: 'completed' } as any
+        { amount: '5000', status: TransactionStatus.Completed } as any
       ]);
 
       const result = await service.checkTransactionLimit(userId, transactionAmount);
@@ -63,9 +63,9 @@ describe('TransactionLimitService', () => {
 
       mockKycService.getUserKYCLevel.mockResolvedValue(KYCLevel.Basic);
       mockTransactionModel.findCompletedByUserSince.mockResolvedValue([
-        { amount: '30000', status: 'completed' } as any,
-        { amount: '20000', status: 'completed' } as any,
-        { amount: '15000', status: 'completed' } as any
+        { amount: '30000', status: TransactionStatus.Completed } as any,
+        { amount: '20000', status: TransactionStatus.Completed } as any,
+        { amount: '15000', status: TransactionStatus.Completed } as any
       ]);
 
       const result = await service.checkTransactionLimit(userId, transactionAmount);
