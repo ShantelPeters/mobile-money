@@ -17,6 +17,16 @@ export class AirtelService {
       return this.token;
     }
 
+    const response = await this.client.post("/auth/oauth2/token", null, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Basic " +
+          Buffer.from(
+            `${process.env.AIRTEL_API_KEY}:${process.env.AIRTEL_API_SECRET}`,
+          ).toString("base64"),
+      },
+    });
     try {
       const response = await this.client.post("/auth/oauth2/token", null, {
         headers: {
@@ -48,6 +58,7 @@ export class AirtelService {
       } catch (err) {
         lastError = err as Error;
 
+        // Retry only for transient errors
         if (
           ((err as { response?: { status?: number } }).response?.status &&
             (err as { response: { status: number } }).response.status >= 500) ||
@@ -62,7 +73,7 @@ export class AirtelService {
       }
     }
 
-    throw lastError!;
+    throw lastError;
   }
 
   /**
@@ -117,18 +128,21 @@ export class AirtelService {
     const token = await this.authenticate();
 
     return this.withRetry(async () => {
-      const response = await this.client.get(
-        `/standard/v1/payments/${reference}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "X-Country": "NG",
-            "X-Currency": "NGN",
+      try {
+        const response = await this.client.get(
+          `/standard/v1/payments/${reference}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "X-Country": "NG",
+              "X-Currency": "NGN",
+            },
           },
-        },
-      );
-
-      return { success: true, data: response.data };
+        );
+        return { success: true, data: response.data };
+      } catch (error) {
+        return { success: false, error };
+      }
     });
   }
 

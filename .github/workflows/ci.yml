@@ -43,10 +43,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+          cache: npm
+
+      - name: Verify package-lock.json exists
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "⚠️ package-lock.json not found, generating it..."
+            npm install --package-lock-only
+          else
+            echo "✅ package-lock.json found"
+          fi
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Run database migrations
+        run: npm run migrate:up
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
 
       - name: Run linter
         run: npm run lint
@@ -80,7 +94,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+          cache: npm
+
+      - name: Verify package-lock.json exists
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "⚠️ package-lock.json not found, generating it..."
+            npm install --package-lock-only
+          else
+            echo "✅ package-lock.json found"
+          fi
 
       - name: Install dependencies
         run: npm ci
@@ -150,4 +173,3 @@ jobs:
             echo "  - ${{ github.repository }}:latest"
           fi
           echo "=================================="
-

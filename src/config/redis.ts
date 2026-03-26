@@ -1,4 +1,9 @@
 import { createClient } from "redis";
+import RedisStore from "connect-redis";
+
+export const SESSION_TTL_SECONDS = parseInt(
+  process.env.SESSION_TTL_SECONDS || "86400",
+);
 
 const redisClient = createClient({
   url: process.env.REDIS_URL || "redis://localhost:6379",
@@ -38,3 +43,10 @@ export async function disconnectRedis(): Promise<void> {
 }
 
 export { redisClient };
+
+export function createRedisStore() {
+  return new RedisStore({
+    client: redisClient,
+    prefix: "session:",
+  });
+}
