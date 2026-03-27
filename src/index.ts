@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from "express";
+import { IncomingMessage } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -126,6 +127,9 @@ app.use(cors(createCorsOptions()));
 app.use(
   express.json({
     limit: process.env.REQUEST_SIZE_LIMIT || "10mb",
+    verify: (req: IncomingMessage, _res, buf) => {
+      (req as IncomingMessage & { rawBody?: Buffer }).rawBody = buf;
+    },
   }),
 );
 app.use(
