@@ -10,12 +10,34 @@ import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
 import { checkReplicaHealth } from "../config/database";
+import multer from "multer";
+import {
+  parseCSV,
+  reconcileTransactions,
+} from "../services/csvReconciliation";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
 const IMPERSONATION_TOKEN_TTL_MS = 15 * 60 * 1000;
 const READ_ONLY_IMPERSONATION_MESSAGE =
   "This token is read-only and cannot be used for mutations.";
+
+// Multer configuration for CSV uploads
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (_req, file, cb) => {
+    if (
+      file.mimetype === "text/csv" ||
+      file.mimetype === "application/vnd.ms-excel" ||
+      file.originalname.endsWith(".csv")
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only CSV files are allowed"));
+    }
+  },
+});
 
 interface User {
   id: string;
@@ -417,7 +439,76 @@ router.patch(
   updateAdminNotesHandler,
 );
 
-export const adminRoutes = router;
+/**
+ * =========================
+ * CSV RECONCILIATION
+ * =========================
+ */
+
+// POST /api/admin/reconcile
+router.post(
+  "/reconcile",
+  requireAdmin,
+  logAdminAction("CSV_RECONCILIATION"),
+  csvUpload.single("csv"),
+  async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: "No file uploaded",
+          message: "Please upload a CSV file with field name 'csv'",
+        });
+      }
+
+      // Parse optional date range from query params
+      const dateRange = {
+        start: req.query.start_date as string | undefined,
+        end: req.query.end_date as string | undefined,
+      };
+
+      // Parse CSV
+      const providerRows = await parseCSV(req.file.buffer);
+
+      if (providerRows.length === 0) {
+        return res.status(400).json({
+          error: "Empty CSV",
+          message: "The uploaded CSV file contains no data rows",
+        });
+      }
+
+      // Perform reconciliation
+      const result = await reconcileTransactions(providerRows, dateRange);
+
+      // Log reconciliation summary
+      console.log("[CSV RECONCILIATION]", {
+        adminId: (req as AuthRequest).user?.id,
+        filename: req.file.originalname,
+        summary: result.summary,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        message: "Reconciliation completed successfully",
+        result,
+      });
+    } catch (error) {
+      console.error("[CSV RECONCILIATION ERROR]", error);
+
+      if (error instanceof Error) {
+        return res.status(500).json({
+          error: "Reconciliation failed",
+          message: error.message,
+        });
+      }
+
+      res.status(500).json({
+        error: "Reconciliation failed",
+        message: "An unexpected error occurred during reconciliation",
+      });
+    }
+  },
+);
+
 /**
  * =========================
  * HEALTH & MONITORING
