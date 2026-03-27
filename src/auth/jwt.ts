@@ -35,6 +35,7 @@ function getJwtSecret(): string {
 export interface JWTPayload {
   userId: string;
   email: string;
+  role?: string;
   impersonation?: JWTImpersonationClaim;
   iat?: number;
   exp?: number;
