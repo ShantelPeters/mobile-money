@@ -17,6 +17,7 @@ import {
   statsRoutesV1,
   transactionDisputeRoutesV1,
   transactionRoutesV1,
+  vaultRoutesV1,
 } from "./routes/v1";
 import { transactionRoutes } from "./routes/transactions";
 import { bulkRoutes } from "./routes/bulk";
@@ -25,7 +26,7 @@ import { statsRoutes } from "./routes/stats";
 import { contactsRoutes } from "./routes/contacts";
 import { reportsRoutes } from "./routes/reports";
 import { createKYCRoutes } from "./routes/kycRoutes";
-import stellarRoutes from "./routes/stellar";
+import { vaultRoutes } from "./routes/vaults";
 import { errorHandler } from "./middleware/errorHandler";
 import {
   connectRedis,
@@ -45,7 +46,9 @@ import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
+import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import sep31Router from "./stellar/sep31";
 
 dotenv.config();
 
@@ -134,6 +137,7 @@ app.use(
     },
   }),
 );
+app.use(sessionAnomalyLogger);
 
 app.get("/health", (_req: Request, res: Response) => {
   const body: HealthCheckResponse = {
@@ -188,6 +192,7 @@ app.use("/api/v1/transactions", transactionDisputeRoutesV1);
 app.use("/api/v1/transactions/bulk", bulkRoutesV1);
 app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
+app.use("/api/v1/vaults", vaultRoutesV1);
 
 const deprecatedApiV1Handler: express.RequestHandler = (req, res, next) => {
   const versionedReq = req as VersionedRequest;
@@ -213,7 +218,10 @@ app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
-app.use("/api/stellar", stellarRoutes);
+app.use("/sep31", sep31Router);
+
+// SEP-24 Interactive Deposit/Withdrawal Flow
+app.use("/sep24", sep24Router);
 
 app.use(
   (
