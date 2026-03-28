@@ -8,7 +8,11 @@ export const CHALLENGE_TTL_SECONDS = 300;
 export function generateRegistrationOptionsForUser(_userId: string) {
   throw new Error("WebAuthn registration not configured in this build");
 }
-export function getRpConfig(): { rpName: string; rpID: string; origin: string } {
+export function getRpConfig(): {
+  rpName: string;
+  rpID: string;
+  origin: string;
+} {
   return {
     rpName: process.env.WEBAUTHN_RP_NAME || "Mobile Money App",
     rpID: process.env.WEBAUTHN_RP_ID || "localhost",
