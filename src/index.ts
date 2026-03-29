@@ -243,6 +243,64 @@ app.get("/ready", async (_req: Request, res: Response) => {
   res.status(allReady ? 200 : 503).json(body);
 });
 
+
+// Load Balancer Health Check
+let lbHealthCache: { data: any, timestamp: number } | null = null;
+const LB_HEALTH_CACHE_TTL = 5000;
+
+app.get("/health/lb", async (req: Request, res: Response) => {
+  const now = Date.now();
+  if (lbHealthCache && (now - lbHealthCache.timestamp < LB_HEALTH_CACHE_TTL)) {
+    res.status(lbHealthCache.data.status === "ok" ? 200 : 503).json(lbHealthCache.data);
+    return;
+  }
+
+  const checks: Record<string, string> = {
+    database: "down",
+    redis: "down",
+    memory: "ok"
+  };
+  let healthy = true;
+
+  if (isShuttingDown) {
+    healthy = false;
+  }
+
+  try {
+    await pool.query("SELECT 1");
+    checks.database = "ok";
+  } catch (err) {
+    healthy = false;
+  }
+
+  try {
+    if (redisClient?.isOpen) {
+      await redisClient.ping();
+      checks.redis = "ok";
+    } else {
+      checks.redis = "closed";
+      healthy = false;
+    }
+  } catch (err) {
+    healthy = false;
+  }
+
+  const memUsage = process.memoryUsage();
+  if (memUsage.heapUsed > 1024 * 1024 * 1024) { // 1GB limit
+    checks.memory = "high";
+    healthy = false;
+  }
+
+  const responseData = {
+    status: healthy ? "ok" : "error",
+    checks,
+    timestamp: new Date().toISOString()
+  };
+
+  lbHealthCache = { data: responseData, timestamp: now };
+  res.status(healthy ? 200 : 503).json(responseData);
+});
+
 app.use(globalTimeout);
 app.use(haltOnTimedout);
 
