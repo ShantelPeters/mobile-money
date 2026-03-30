@@ -106,16 +106,16 @@ authRoutes.get("/tokens/active/:family_id", authenticateToken, tokenController.f
 /**
  * DELETE /api/auth/tokens
  *
- * Delete a specific refresh token
+ * Delete all refresh token
  */ 
-authRoutes.delete("/tokens/:token_id/:family_id", authenticateToken, tokenController.revoke);
+authRoutes.delete("/tokens/revoke-all/:family_id", authenticateToken, tokenController.revokeAll);
 
 /**
  * DELETE /api/auth/tokens
  *
- * Delete all refresh token
+ * Delete a specific refresh token
  */ 
-authRoutes.delete("/revoke-all", authenticateToken, tokenController.revokeAll);
+authRoutes.delete("/tokens/:token_id/:family_id", authenticateToken, tokenController.revoke);
 
 /**
  * POST /api/auth/verify
