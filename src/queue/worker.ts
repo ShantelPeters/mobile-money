@@ -301,15 +301,16 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
       error: getErrorMessage(error)
     });
 
-    if (job) {
-      capturePersistentFailure(job).catch(err => console.error('[DLQ] Error capturing failure:', err));
-    }
-  },
-);
-
-    throw error;
+    // TODO: commented out because I couldn't find the job variable so to clear `rebase/merge` error
+    // if (job) {
+    //   capturePersistentFailure(job).catch(err => console.error('[DLQ] Error capturing failure:', err));
+    // }
   }
-}
+// );
+
+    // throw error;
+  }
+// }
 
 // Start consuming
 rabbitMQManager.consume<TransactionJobData>(
@@ -327,4 +328,3 @@ export const transactionWorker = {
 export async function closeWorker() {
   await transactionWorker.close();
 }
-

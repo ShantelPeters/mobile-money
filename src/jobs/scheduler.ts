@@ -6,6 +6,7 @@ import { runStatusCheckJob } from "./statusCheckJob";
 import { runDisputeSlaJob } from "./disputeSlaJob";
 import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
+import { runProviderBalanceAlertJob } from "./balances";
 
 interface JobConfig {
   name: string;

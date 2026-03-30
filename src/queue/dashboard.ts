@@ -1,4 +1,8 @@
+import { createBullBoard } from "@bull-board/api";
 import { Router } from "express";
+import { transactionQueue } from "./transactionQueue";
+import { deadLetterQueue } from "./dlq";
+import { providerBalanceAlertQueue } from "./providerBalanceAlertQueue";
 
 export function createQueueDashboard() {
   const router = Router();
@@ -8,7 +12,9 @@ export function createQueueDashboard() {
       <h1>Queue Dashboard</h1>
       <p>The queue dashboard has been migrated to RabbitMQ.</p>
       <p>Please use the RabbitMQ Management UI to monitor queues.</p>
-    `);
+    `)
+
+
   createBullBoard({
     queues: [
       createQueueAdapter(),
@@ -25,7 +31,11 @@ export function createQueueDashboard() {
       },
     },
   });
+  
+});
 
   return router;
 }
-
+function createQueueAdapter(transactionQueue: { close: () => Promise<void>; getName: () => string; }): import("@bull-board/api/baseAdapter").BaseAdapter {
+  throw new Error("Function not implemented.");
+}

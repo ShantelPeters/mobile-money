@@ -46,6 +46,7 @@ export {
 
 export { queueOptions } from "./config";
 export { deadLetterQueue, DLQ_NAME, capturePersistentFailure } from "./dlq";
+export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
 
 // Account Merge Queue Exports
 export {
