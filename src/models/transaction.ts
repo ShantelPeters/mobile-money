@@ -14,6 +14,7 @@ const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
 
 const MAX_METADATA_BYTES = 10240; // 10 KB
+const MAX_NOTES_LENGTH = 256;
 
 const TRANSACTION_SELECT_COLUMNS = `
   id,
@@ -148,29 +149,30 @@ export function mapTransactionRow(
   const dbRow = row as Record<string, unknown>;
   const created = dbRow.created_at ?? row.createdAt;
   const updated = dbRow.updated_at ?? row.updatedAt;
-  
+
   // Cast to any for easier access to snake_case fields that might be in the object
   const r = row as any;
   const db = dbRow as any;
 
   return {
     id: String(r.id),
-    referenceNumber: String(
-      db.reference_number ?? r.referenceNumber ?? "",
-    ),
+    referenceNumber: String(db.reference_number ?? r.referenceNumber ?? ""),
     type: (r.type as Transaction["type"]) || "deposit",
     amount: String(r.amount ?? ""),
-    phoneNumber: decrypt(String(db.phone_number ?? r.phoneNumber ?? "")) as string,
+    phoneNumber: decrypt(
+      String(db.phone_number ?? r.phoneNumber ?? ""),
+    ) as string,
     provider: String(r.provider ?? ""),
-    stellarAddress: decrypt(String(db.stellar_address ?? r.stellarAddress ?? "")) as string,
+    stellarAddress: decrypt(
+      String(db.stellar_address ?? r.stellarAddress ?? ""),
+    ) as string,
     status: r.status as TransactionStatus,
     tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
     notes: decrypt(db.notes ?? r.notes) ?? undefined,
-    admin_notes: decrypt(db.admin_notes ?? r.admin_notes ?? r.adminNotes) ?? undefined,
+    admin_notes:
+      decrypt(db.admin_notes ?? r.admin_notes ?? r.adminNotes) ?? undefined,
     metadata:
-      r.metadata &&
-      typeof r.metadata === "object" &&
-      !Array.isArray(r.metadata)
+      r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata)
         ? (r.metadata as Record<string, unknown>)
         : {},
     locationMetadata:
@@ -247,7 +249,7 @@ export class TransactionModel {
   }
 
   async findById(id: string): Promise<Transaction | null> {
-     const result = await queryRead<Transaction>(
+    const result = await queryRead<Transaction>(
       `SELECT ${TRANSACTION_SELECT_COLUMNS}
         FROM transactions
         WHERE id = $1`,
@@ -517,8 +519,8 @@ export class TransactionModel {
   }
 
   async updateNotes(id: string, notes: string): Promise<Transaction | null> {
-    if (notes.length > 1000) {
-      throw new Error("Notes cannot exceed 1000 characters");
+    if (notes.length > MAX_NOTES_LENGTH) {
+      throw new Error(`Notes cannot exceed ${MAX_NOTES_LENGTH} characters`);
     }
 
     const encryptedNotes = encrypt(notes);
