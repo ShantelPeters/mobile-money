@@ -13,6 +13,8 @@ import { KYCService } from "../services/kyc/kycService";
 import { MobileMoneyProvider, validateProviderLimits } from "../config/providers";
 import type { TransactionJobData } from "../queue/transactionQueue";
 import { amlService } from "../services/aml";
+import { maskPhoneNumber } from "../utils/masking";
+
 import {
   CancelTransactionResponse,
   LimitExceededErrorResponse,
@@ -641,14 +643,8 @@ export const searchTransactionsHandler = async (
 
     const masked = transactions.map((tx: any) => ({
       ...tx,
-      phoneNumber:
-        typeof tx.phoneNumber === "string"
-          ? `****${tx.phoneNumber.slice(-4)}`
-          : tx.phoneNumber,
-      phone_number:
-        typeof tx.phone_number === "string"
-          ? `****${tx.phone_number.slice(-4)}`
-          : tx.phone_number,
+      phoneNumber: maskPhoneNumber(tx.phoneNumber),
+      phone_number: maskPhoneNumber(tx.phone_number),
     }));
 
     const body: PhoneSearchResponse = {
