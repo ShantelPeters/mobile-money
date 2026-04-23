@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
-import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { TransactionModel, TransactionStatus,AssetType } from "../models/transaction";
 import { lockManager, LockKeys } from "../utils/lock";
 import { addTransactionJob, getJobProgress } from "../queue";
 
@@ -22,6 +22,7 @@ export const depositHandler = async (req: Request, res: Response) => {
           phoneNumber,
           provider,
           stellarAddress,
+          assetType: AssetType.XLM,
           status: TransactionStatus.Pending,
           tags: [],
         });
@@ -71,6 +72,7 @@ export const withdrawHandler = async (req: Request, res: Response) => {
       phoneNumber,
       provider,
       stellarAddress,
+      assetType: AssetType.XLM,
       status: TransactionStatus.Pending,
       tags: [],
     });
@@ -135,7 +137,7 @@ export const cancelTransactionHandler = async (req: Request, res: Response) => {
       });
     }
 
-    const updatedTransaction = await transactionModel.updateStatus(id, "cancelled" );
+    const updatedTransaction = await transactionModel.updateStatus(id, TransactionStatus.Cancelled);
 
     console.log("Transaction cancelled", {
       transactionId: id,
