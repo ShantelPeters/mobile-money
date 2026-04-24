@@ -41,7 +41,29 @@ const SUPPORTED_ASSET_PAIRS: AssetPair[] = [
   { sell_asset: "stellar:USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", buy_asset: "stellar:XLM" },
 ];
 
-// Exchange rate service - can be replaced with live service integration
+// Constants for SEP-38 compliance
+const DEFAULT_TTL = 60; // 1 minute default
+const MAX_TTL = 300; // 5 minutes maximum
+const MIN_TTL = 0; // Minimum TTL (0 means use default)
+const PRICE_PRECISION = 7; // Number of decimal places for prices
+
+/**
+ * Validates if a string represents a valid positive number
+ */
+function isValidPositiveNumber(value: string): boolean {
+  if (!value || typeof value !== 'string') return false;
+  const num = parseFloat(value);
+  return !isNaN(num) && isFinite(num) && num > 0;
+}
+
+/**
+ * Helper to validate and normalize asset identifiers
+ */
+function isValidAsset(asset: string): boolean {
+  if (!asset || typeof asset !== 'string') return false;
+  // Check for valid stellar or iso4217 format
+  return asset.startsWith('stellar:') || asset.startsWith('iso4217:');
+}
 
 // Exchange rate service - can be replaced with live service integration
 class ExchangeRateService {
@@ -84,7 +106,7 @@ class ExchangeRateService {
     const variation = 1 + (Math.random() - 0.5) * 0.002;
     const adjustedRate = rate * variation;
     
-    return adjustedRate.toFixed(7);
+    return adjustedRate.toFixed(PRICE_PRECISION);
   }
 
   async getQuote(
@@ -105,10 +127,10 @@ class ExchangeRateService {
 
     if (sellAmount) {
       sAmt = sellAmount;
-      bAmt = (parseFloat(sellAmount) * priceNum).toFixed(7);
+      bAmt = (parseFloat(sellAmount) * priceNum).toFixed(PRICE_PRECISION);
     } else if (buyAmount) {
       bAmt = buyAmount;
-      sAmt = (parseFloat(buyAmount) / priceNum).toFixed(7);
+      sAmt = (parseFloat(buyAmount) / priceNum).toFixed(PRICE_PRECISION);
     }
 
     return { sellAmount: sAmt, buyAmount: bAmt, price };
@@ -128,7 +150,7 @@ router.get("/info", (req: Request, res: Response) => {
     };
     res.json(info);
   } catch (error) {
-    console.error("Error in /info endpoint:", error);
+    console.error("Error in /sep38/info endpoint:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -142,6 +164,13 @@ router.get("/prices", async (req: Request, res: Response) => {
     if (!sell_asset || !buy_asset) {
       return res.status(400).json({ 
         error: "Missing required parameters: sell_asset and buy_asset" 
+      });
+    }
+
+    // Validate asset format
+    if (!isValidAsset(sell_asset as string) || !isValidAsset(buy_asset as string)) {
+      return res.status(400).json({ 
+        error: "Invalid asset format. Assets must be in format 'stellar:*' or 'iso4217:*'" 
       });
     }
 
@@ -172,7 +201,7 @@ router.get("/prices", async (req: Request, res: Response) => {
 
     res.json(priceResponse);
   } catch (error) {
-    console.error("Error in /prices endpoint:", error);
+    console.error("Error in /sep38/prices endpoint:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -183,9 +212,22 @@ router.post("/quote", async (req: Request, res: Response) => {
     const { sell_asset, buy_asset, sell_amount, buy_amount, ttl } = req.body;
 
     // Validate required parameters
-    if (!sell_asset || !buy_asset || (!sell_amount && !buy_amount)) {
+    if (!sell_asset || !buy_asset) {
+      return res.status(400).json({ 
+        error: "Missing required parameters: sell_asset and buy_asset" 
+      });
+    }
+
+    if (!sell_amount && !buy_amount) {
       return res.status(400).json({ 
         error: "Missing required parameters: sell_asset, buy_asset, and either sell_amount or buy_amount" 
+      });
+    }
+
+    // Validate asset format
+    if (!isValidAsset(sell_asset as string) || !isValidAsset(buy_asset as string)) {
+      return res.status(400).json({ 
+        error: "Invalid asset format. Assets must be in format 'stellar:*' or 'iso4217:*'" 
       });
     }
 
@@ -201,13 +243,13 @@ router.post("/quote", async (req: Request, res: Response) => {
     }
 
     // Validate amounts are positive numbers
-    if (sell_amount && parseFloat(sell_amount) <= 0) {
+    if (sell_amount && !isValidPositiveNumber(sell_amount)) {
       return res.status(400).json({ 
         error: "sell_amount must be a positive number" 
       });
     }
 
-    if (buy_amount && parseFloat(buy_amount) <= 0) {
+    if (buy_amount && !isValidPositiveNumber(buy_amount)) {
       return res.status(400).json({ 
         error: "buy_amount must be a positive number" 
       });
@@ -227,9 +269,18 @@ router.post("/quote", async (req: Request, res: Response) => {
       });
     }
 
-    // Calculate TTL (Time To Live) in seconds
-    const defaultTTL = 60; // 1 minute default
-    const quoteTTL = ttl && ttl > 0 ? (ttl > 300 ? 300 : ttl) : defaultTTL;
+    // Calculate TTL (Time To Live) in seconds - SEP-38 compliant
+    let quoteTTL = DEFAULT_TTL;
+    if (ttl !== undefined && ttl !== null) {
+      const ttlNum = parseInt(ttl);
+      if (!isNaN(ttlNum)) {
+        if (ttlNum > 0) {
+          quoteTTL = ttlNum > MAX_TTL ? MAX_TTL : ttlNum;
+        } else {
+          quoteTTL = DEFAULT_TTL;
+        }
+      }
+    }
 
     // Generate quote ID and expiration time
     const quoteId = uuidv4();
@@ -253,7 +304,7 @@ router.post("/quote", async (req: Request, res: Response) => {
 
     res.json(quote);
   } catch (error) {
-    console.error("Error in /quote endpoint:", error);
+    console.error("Error in /sep38/quote endpoint:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -263,6 +314,11 @@ router.get("/quote/:id", (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
+    // Validate quote ID format
+    if (!id || typeof id !== 'string' || id.trim().length === 0) {
+      return res.status(400).json({ error: "Invalid quote ID" });
+    }
+
     const quote = quoteCache.get<Quote>(id);
     
     if (!quote) {
@@ -281,7 +337,7 @@ router.get("/quote/:id", (req: Request, res: Response) => {
 
     res.json(quote);
   } catch (error) {
-    console.error("Error in /quote/:id endpoint:", error);
+    console.error("Error in /sep38/quote/:id endpoint:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });

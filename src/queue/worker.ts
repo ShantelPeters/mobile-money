@@ -1,35 +1,31 @@
-import { Worker, Job, JobProgress } from "bullmq";
+import { Message as AmqpMessage } from "amqplib";
 import {
   TransactionJobData,
   TransactionJobResult,
-  TRANSACTION_QUEUE_NAME,
 } from "./transactionQueue";
-import { queueOptions } from "./config";
+import { rabbitMQManager, EXCHANGES, ROUTING_KEYS, QUEUES } from "./rabbitmq";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { StellarService } from "../services/stellar/stellarService";
 import { EmailService } from "../services/email";
 import { UserModel } from "../models/users";
 import { withRetry } from "../services/retry";
+import { WhatsappService } from "../services/whatsapp";
 import { SmsService } from "../services/sms";
 import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
-
+import { pushNotificationService } from "../services/push";
+import { capturePersistentFailure } from "./dlq";
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
 const stellarService = new StellarService();
 const emailService = new EmailService();
 const userModel = new UserModel();
+const whatsappService = new WhatsappService();
 const smsService = new SmsService();
 const webhookService = new WebhookService();
+const pushService = pushNotificationService;
 
-const workerOptions = {
-  ...queueOptions,
-  concurrency: 5,
-  limiter: {
-    max: 10,
-    duration: 1000,
-  },
-};
+const CONCURRENCY = 5;
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
@@ -58,7 +54,11 @@ async function sendTransactionEmail(transactionId: string): Promise<void> {
 
   const user = await userModel.findById(transaction.userId);
   if (user?.email) {
-    await emailService.sendTransactionReceipt(user.email, transaction);
+    await emailService.sendTransactionReceipt(
+      user.email,
+      transaction,
+      user.preferredLanguage,
+    );
   }
 }
 
@@ -73,219 +73,295 @@ async function sendFailureEmail(
 
   const user = await userModel.findById(transaction.userId);
   if (user?.email) {
-    await emailService.sendTransactionFailure(user.email, transaction, reason);
+    await emailService.sendTransactionFailure(
+      user.email,
+      transaction,
+      reason,
+      user.preferredLanguage,
+    );
   }
 }
 
-export const transactionWorker = new Worker<
-  TransactionJobData,
-  TransactionJobResult
->(
-  TRANSACTION_QUEUE_NAME,
-  async (job: Job<TransactionJobData, TransactionJobResult>) => {
-    const {
-      transactionId,
-      type,
-      amount,
-      phoneNumber,
-      provider,
-      stellarAddress,
-    } = job.data;
+async function sendTransactionPush(
+  transactionId: string,
+  status: "completed" | "failed",
+  error?: string,
+): Promise<void> {
+  const transaction = await transactionModel.findById(transactionId);
+  if (!transaction?.userId) {
+    return;
+  }
 
-    console.log(`[${job.id}] Processing ${type} transaction: ${transactionId}`);
-
-    const maxAttempts = Math.max(
-      1,
-      parseInt(process.env.MAX_RETRY_ATTEMPTS || "3", 10),
-    );
-    const baseDelayMs = Math.max(
-      0,
-      parseInt(process.env.RETRY_DELAY_MS || "1000", 10),
-    );
-
-    const retryConfig = {
-      maxAttempts,
-      baseDelayMs,
-      onRetry: async ({
-        attempt,
+  try {
+    if (status === "completed") {
+      await pushService.sendTransactionComplete(transaction.userId, {
+        transactionId: transaction.id,
+        referenceNumber: transaction.referenceNumber,
+        type: transaction.type as "deposit" | "withdraw",
+        amount: String(transaction.amount),
+        status: "completed",
         error,
-      }: {
-        attempt: number;
-        error: unknown;
-      }) => {
-        await transactionModel.incrementRetryCount(transactionId);
-        console.warn(
-          `[${job.id}] transient failure (attempt ${attempt}), will retry:`,
-          error instanceof Error ? error.message : error,
-        );
-      },
-    };
+      });
+    } else {
+      await pushService.sendTransactionFailed(transaction.userId, {
+        transactionId: transaction.id,
+        referenceNumber: transaction.referenceNumber,
+        type: transaction.type as "deposit" | "withdraw",
+        amount: String(transaction.amount),
+        status: "failed",
+        error,
+      });
+    }
+  } catch (pushError) {
+    console.error(`[${transactionId}] Push notification failed:`, pushError);
+  }
+}
 
-    const sendTxnSms = async (
-      kind: "transaction_completed" | "transaction_failed",
-      errorMessage?: string,
-    ) => {
-      try {
-        const txRow = await transactionModel.findById(transactionId);
-        const ref = txRow?.referenceNumber ?? transactionId;
-        await smsService.notifyTransactionEvent(phoneNumber, {
-          referenceNumber: ref,
-          type,
-          amount: String(amount),
-          provider,
-          kind,
-          errorMessage,
-        });
-      } catch (smsErr) {
-        console.error(`[${job.id}] SMS notification error`, smsErr);
-      }
-    };
+async function updateProgress(transactionId: string, progress: number) {
+  try {
+    await transactionModel.patchMetadata(transactionId, { progress });
+  } catch (err) {
+    console.warn(`[${transactionId}] Failed to update progress metadata:`, err);
+  }
+}
 
+async function processTransaction(data: TransactionJobData): Promise<TransactionJobResult> {
+  const {
+    transactionId,
+    type,
+    amount,
+    phoneNumber,
+    provider,
+    stellarAddress,
+  } = data;
+
+  console.log(`[RabbitMQ] Processing ${type} transaction: ${transactionId}`);
+
+  const maxAttempts = Math.max(
+    1,
+    parseInt(process.env.MAX_RETRY_ATTEMPTS || "3", 10),
+  );
+  const baseDelayMs = Math.max(
+    0,
+    parseInt(process.env.RETRY_DELAY_MS || "1000", 10),
+  );
+
+  const retryConfig = {
+    maxAttempts,
+    baseDelayMs,
+    onRetry: async ({
+      attempt,
+      error,
+    }: {
+      attempt: number;
+      error: unknown;
+    }) => {
+      await transactionModel.incrementRetryCount(transactionId);
+      console.warn(
+        `[${transactionId}] transient failure (attempt ${attempt}), will retry:`,
+        error instanceof Error ? error.message : error,
+      );
+    },
+  };
+
+  const sendTxnSms = async (
+    kind: "transaction_completed" | "transaction_failed",
+    errorMessage?: string,
+  ) => {
     try {
-      await job.updateProgress(10);
+      const txRow = await transactionModel.findById(transactionId);
+      const ref = txRow?.referenceNumber ?? transactionId;
+      await smsService.notifyTransactionEvent(phoneNumber, {
+        referenceNumber: ref,
+        type,
+        amount: String(amount),
+        provider,
+        kind,
+        errorMessage,
+      });
+    } catch (smsErr) {
+      console.error(`[${transactionId}] SMS notification error`, smsErr);
+    }
+  };
 
-      if (type === "deposit") {
-        await job.updateProgress(20);
-
-        const mobileMoneyResult = await withRetry(async () => {
-          const mobileMoneyResult = await mobileMoneyService.initiatePayment(
-            provider,
-            phoneNumber,
-            amount,
-          );
-          if (!mobileMoneyResult.success) {
-            throw new Error(getProviderFailureMessage(mobileMoneyResult));
-          }
-          return mobileMoneyResult;
-        }, retryConfig);
-
-        await job.updateProgress(50);
-
-        if (!mobileMoneyResult.success) {
-          throw new Error(getProviderFailureMessage(mobileMoneyResult));
-        }
-        await job.updateProgress(70);
-
-        await withRetry(
+        const stellarResult = await withRetry(
           () => stellarService.sendPayment(stellarAddress, amount),
           retryConfig,
         );
 
-        await job.updateProgress(90);
-
-        await transactionModel.updateStatus(
-          transactionId,
-          TransactionStatus.Completed,
-        );
-        await notifyTransactionWebhook(transactionId, "transaction.completed", {
-          transactionModel,
-          webhookService,
-        });
-        await sendTransactionEmail(transactionId);
-
-        await sendTxnSms("transaction_completed");
-
-        await job.updateProgress(100);
-
-        console.log(
-          `[${job.id}] Deposit completed successfully: ${transactionId}`,
-        );
-
-        return {
-          success: true,
-          transactionId,
-        };
-      } else {
-        await job.updateProgress(20);
-
-        const mobileMoneyResult = await withRetry(async () => {
-          const mobileMoneyResult = await mobileMoneyService.sendPayout(
-            provider,
-            phoneNumber,
-            amount,
-          );
-          if (!mobileMoneyResult.success) {
-            throw new Error(getProviderFailureMessage(mobileMoneyResult));
-          }
-          return mobileMoneyResult;
-        }, retryConfig);
-
-        await job.updateProgress(50);
-
-        if (!mobileMoneyResult.success) {
-          throw new Error(getProviderFailureMessage(mobileMoneyResult));
+        // Store Stellar transaction details in metadata
+        if (stellarResult.hash) {
+          const currentMetadata = (await transactionModel.findById(transactionId))?.metadata || {};
+          const updatedMetadata = {
+            ...currentMetadata,
+            stellar: {
+              transactionHash: stellarResult.hash,
+              submittedAt: stellarResult.submittedAt?.toISOString(),
+              feeBumps: [],
+            },
+          };
+          await transactionModel.updateMetadata(transactionId, updatedMetadata);
         }
+
         await job.updateProgress(90);
+  try {
+    await updateProgress(transactionId, 10);
 
-        await transactionModel.updateStatus(
-          transactionId,
-          TransactionStatus.Completed,
+    if (type === "deposit") {
+      await updateProgress(transactionId, 20);
+
+      const mobileMoneyResult = await withRetry(async () => {
+        const result = await mobileMoneyService.initiatePayment(
+          provider,
+          phoneNumber,
+          amount,
         );
-        await notifyTransactionWebhook(transactionId, "transaction.completed", {
-          transactionModel,
-          webhookService,
-        });
-        await sendTransactionEmail(transactionId);
+        if (!result.success) {
+          throw new Error(getProviderFailureMessage(result));
+        }
+        return result;
+      }, retryConfig);
 
-        await sendTxnSms("transaction_completed");
-
-        await job.updateProgress(100);
-
-        console.log(
-          `[${job.id}] Withdraw completed successfully: ${transactionId}`,
-        );
-
-        return {
-          success: true,
-          transactionId,
-        };
+      // Issue #515: Log provider response time in transaction metadata
+      if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
+        await transactionModel.patchMetadata(transactionId, {
+          providerResponseTimeMs: mobileMoneyResult.providerResponseTimeMs,
+          providerRespondedAt: new Date().toISOString(),
+        }).catch(err => console.warn(`[${transactionId}] Failed to log provider response time:`, err));
       }
-    } catch (error) {
-      console.error(`[${job.id}] Transaction failed:`, error);
+
+      await updateProgress(transactionId, 50);
+
+      if (!mobileMoneyResult.success) {
+        throw new Error(getProviderFailureMessage(mobileMoneyResult));
+      }
+      await updateProgress(transactionId, 70);
+
+      await withRetry(
+        () => stellarService.sendPayment(stellarAddress, amount),
+        retryConfig,
+      );
+
+      await updateProgress(transactionId, 90);
+
       await transactionModel.updateStatus(
         transactionId,
-        TransactionStatus.Failed,
+        TransactionStatus.Completed,
       );
-      await notifyTransactionWebhook(transactionId, "transaction.failed", {
+      await notifyTransactionWebhook(transactionId, "transaction.completed", {
         transactionModel,
         webhookService,
       });
-      await sendFailureEmail(transactionId, getErrorMessage(error));
-      throw error;
+      await sendTransactionEmail(transactionId);
+      await sendTransactionPush(transactionId, "completed");
+      await sendTxnSms("transaction_completed");
+      
+      // Fan-out event
+      await rabbitMQManager.publish(EXCHANGES.TRANSACTIONS, ROUTING_KEYS.TRANSACTION_COMPLETED, {
+        transactionId,
+        status: "completed"
+      });
+
+      await updateProgress(transactionId, 100);
+      console.log(`[${transactionId}] Deposit completed successfully`);
+
+      return { success: true, transactionId };
+    } else {
+      await updateProgress(transactionId, 20);
+
+      const mobileMoneyResult = await withRetry(async () => {
+        const result = await mobileMoneyService.sendPayout(
+          provider,
+          phoneNumber,
+          amount,
+        );
+        if (!result.success) {
+          throw new Error(getProviderFailureMessage(result));
+        }
+        return result;
+      }, retryConfig);
+
+      // Issue #515: Log provider response time in transaction metadata
+      if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
+        await transactionModel.patchMetadata(transactionId, {
+          providerResponseTimeMs: mobileMoneyResult.providerResponseTimeMs,
+          providerRespondedAt: new Date().toISOString(),
+        }).catch(err => console.warn(`[${transactionId}] Failed to log provider response time:`, err));
+      }
+
+      await updateProgress(transactionId, 50);
+
+      if (!mobileMoneyResult.success) {
+        throw new Error(getProviderFailureMessage(mobileMoneyResult));
+      }
+      await updateProgress(transactionId, 90);
+
+      await transactionModel.updateStatus(
+        transactionId,
+        TransactionStatus.Completed,
+      );
+      await notifyTransactionWebhook(transactionId, "transaction.completed", {
+        transactionModel,
+        webhookService,
+      });
+      await sendTransactionEmail(transactionId);
+      await sendTransactionPush(transactionId, "completed");
+      await sendTxnSms("transaction_completed");
+
+      // Fan-out event
+      await rabbitMQManager.publish(EXCHANGES.TRANSACTIONS, ROUTING_KEYS.TRANSACTION_COMPLETED, {
+        transactionId,
+        status: "completed"
+      });
+
+      await updateProgress(transactionId, 100);
+      console.log(`[${transactionId}] Withdraw completed successfully`);
+
+      return { success: true, transactionId };
     }
-  },
-  workerOptions,
-);
-
-transactionWorker.on(
-  "completed",
-  (job: Job<TransactionJobData, TransactionJobResult>) => {
-    console.log(`[${job.id}] Job completed successfully`);
-  },
-);
-
-transactionWorker.on(
-  "failed",
-  (
-    job: Job<TransactionJobData, TransactionJobResult> | undefined,
-    error: Error,
-  ) => {
-    console.error(
-      `[${job?.id}] Job failed after ${job?.attemptsMade} attempts:`,
-      error.message,
+  } catch (error) {
+    console.error(`[${transactionId}] Transaction failed:`, error);
+    await transactionModel.updateStatus(
+      transactionId,
+      TransactionStatus.Failed,
     );
-  },
-);
+    await notifyTransactionWebhook(transactionId, "transaction.failed", {
+      transactionModel,
+      webhookService,
+    });
+    await sendFailureEmail(transactionId, getErrorMessage(error));
+    await sendTransactionPush(transactionId, "failed", getErrorMessage(error));
+    
+    // Fan-out event
+    await rabbitMQManager.publish(EXCHANGES.TRANSACTIONS, ROUTING_KEYS.TRANSACTION_FAILED, {
+      transactionId,
+      status: "failed",
+      error: getErrorMessage(error)
+    });
 
-transactionWorker.on(
-  "progress",
-  (
-    job: Job<TransactionJobData, TransactionJobResult>,
-    progress: JobProgress,
-  ) => {
-    console.log(`[${job.id}] Job progress: ${progress}%`);
+    // TODO: commented out because I couldn't find the job variable so to clear `rebase/merge` error
+    // if (job) {
+    //   capturePersistentFailure(job).catch(err => console.error('[DLQ] Error capturing failure:', err));
+    // }
+  }
+// );
+
+    // throw error;
+  }
+// }
+
+// Start consuming
+rabbitMQManager.consume<TransactionJobData>(
+  QUEUES.TRANSACTION_PROCESSING,
+  async (data, msg) => {
+    await processTransaction(data);
   },
-);
+  CONCURRENCY
+).catch(err => console.error("RabbitMQ Consumer error:", err));
+
+export const transactionWorker = {
+  close: async () => {}, // Handled by rabbitMQManager global shutdown
+};
 
 export async function closeWorker() {
   await transactionWorker.close();

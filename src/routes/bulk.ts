@@ -8,6 +8,7 @@ import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { StellarService } from "../services/stellar/stellarService";
 import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
+import { checkAccountStatusStrict } from "../middleware/checkAccountStatus";
 
 
 interface CsvRow {
@@ -15,6 +16,7 @@ interface CsvRow {
   phoneNumber: string;
   provider: string;
   stellarAddress: string;
+  [key: string]: string;
 }
 
 interface ValidationError {
@@ -137,6 +139,10 @@ async function processJob(jobId: string, rows: CsvRow[]): Promise<void> {
       let failedAlreadyHandled = false;
 
       try {
+        const CORE_FIELDS = new Set(["amount", "phoneNumber", "provider", "stellarAddress"]);
+        const metadata = Object.fromEntries(
+          Object.entries(row).filter(([k]) => !CORE_FIELDS.has(k) && row[k] !== ""),
+        );
         const transaction = await transactionModel.create({
           type: "deposit",
           amount: row.amount,
@@ -145,6 +151,7 @@ async function processJob(jobId: string, rows: CsvRow[]): Promise<void> {
           stellarAddress: row.stellarAddress,
           status: TransactionStatus.Pending,
           tags: [],
+          ...(Object.keys(metadata).length > 0 && { metadata }),
         });
         transactionId = transaction.id;
 
@@ -233,6 +240,7 @@ export const bulkRoutes = Router();
 bulkRoutes.post(
   "/",
   authenticateToken,
+  checkAccountStatusStrict,
   upload.single("file"),
   async (req: Request, res: Response) => {
     if (!req.file) {

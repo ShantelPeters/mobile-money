@@ -4,6 +4,13 @@ import { runCleanupJob } from "./cleanupJob";
 import { runReportJob } from "./reportJob";
 import { runStatusCheckJob } from "./statusCheckJob";
 import { runDisputeSlaJob } from "./disputeSlaJob";
+import { runBalanceMonitorJob } from "./balanceMonitorJob";
+import { runSep31MonitorJob } from "./sep31MonitorJob";
+import { runFeeBumpJob } from "./feeBumpJob";
+import { MonitoringService } from "../services/monitoringService";
+import { createPagerDutyService } from "../services/pagerDutyService";
+import { runProviderBalanceAlertJob } from "./balances";
+import { runProviderHealthCheckJob } from "./providerHealthCheck";
 
 interface JobConfig {
   name: string;
@@ -36,6 +43,36 @@ const JOBS: JobConfig[] = [
     schedule: process.env.ACCOUNT_MERGE_CRON || "0 3 * * *",
     handler: runAccountMergeJob,
   },
+  {
+    name: "balance-monitor",
+    // Every 5 minutes - monitors hot wallet balances
+    schedule: process.env.BALANCE_MONITOR_CRON || "*/5 * * * *",
+    handler: runBalanceMonitorJob,
+  },
+  {
+    name: "sep31-monitor",
+    // Every minute - monitors SEP-31 transactions
+    schedule: process.env.SEP31_MONITOR_CRON || "* * * * *",
+    handler: runSep31MonitorJob,
+  },
+  {
+    name: "fee-bump",
+    // Every 30 seconds - monitors and bumps fees for stuck transactions
+    schedule: process.env.FEE_BUMP_CRON || "*/30 * * * * *",
+    handler: runFeeBumpJob,
+  },
+  {
+    name: "provider-balance-alert",
+    // Every 10 minutes - checks MTN/Airtel operational balances and alerts treasury when low
+    schedule: process.env.PROVIDER_BALANCE_ALERT_CRON || "*/10 * * * *",
+    handler: runProviderBalanceAlertJob,
+  },
+  {
+    name: "provider-health-check",
+    // Every 5 minutes - polls provider APIs for uptime and alerts on outages
+    schedule: process.env.PROVIDER_HEALTH_CHECK_CRON || "*/5 * * * *",
+    handler: runProviderHealthCheckJob,
+  },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
@@ -49,6 +86,13 @@ async function runJob(job: JobConfig): Promise<void> {
 }
 
 export function startJobs(): void {
+  // Initialize PagerDuty integration for monitoring
+  const pagerDutyService = createPagerDutyService();
+  MonitoringService.initialize(pagerDutyService);
+
+  // Start the monitoring service (checks every 30 seconds)
+  MonitoringService.start();
+
   for (const job of JOBS) {
     if (!cron.validate(job.schedule)) {
       console.error(

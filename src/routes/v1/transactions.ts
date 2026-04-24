@@ -17,24 +17,32 @@ import {
 import { TimeoutPresets, haltOnTimedout } from "../../middleware/timeout";
 import { validateTransactionFilters } from "../../utils/transactionFilters";
 import { requireAuth } from "../../middleware/auth";
+import { checkAccountStatusStrict } from "../../middleware/checkAccountStatus";
+import { geolocateMiddleware } from "../../middleware/geolocate";
 
 export const transactionRoutesV1 = Router();
 
 // Deposit transaction route
 transactionRoutesV1.post(
   "/deposit",
+  requireAuth,
+  checkAccountStatusStrict,
   TimeoutPresets.long,
   haltOnTimedout,
   setApiVersion("v1"),
+  geolocateMiddleware,
   depositHandler
 );
 
 // Withdraw transaction route
 transactionRoutesV1.post(
   "/withdraw",
+  requireAuth,
+  checkAccountStatusStrict,
   TimeoutPresets.long,
   haltOnTimedout,
   setApiVersion("v1"),
+  geolocateMiddleware,
   withdrawHandler
 );
 

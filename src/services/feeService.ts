@@ -67,7 +67,8 @@ export class FeeService {
     // Try cache first
     const cached = await redisClient.get(ACTIVE_CONFIG_KEY);
     if (cached) {
-      return JSON.parse(cached);
+      const cachedStr = typeof cached === 'string' ? cached : cached.toString();
+      return JSON.parse(cachedStr);
     }
 
     // Fetch from database
@@ -136,7 +137,8 @@ export class FeeService {
     const cacheKey = `${CACHE_KEY_PREFIX}${id}`;
     const cached = await redisClient.get(cacheKey);
     if (cached) {
-      return JSON.parse(cached);
+      const cachedStr = typeof cached === 'string' ? cached : cached.toString();
+      return JSON.parse(cachedStr);
     }
 
     const query = `
@@ -456,7 +458,9 @@ export class FeeService {
     const pattern = `${CACHE_KEY_PREFIX}*`;
     const keys = await redisClient.keys(pattern);
     if (keys.length > 0) {
-      await redisClient.del(...keys);
+      for (const key of keys) {
+        await redisClient.del(key);
+      }
     }
     await redisClient.del(ACTIVE_CONFIG_KEY);
   }

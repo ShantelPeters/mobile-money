@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyOAuthAccessToken } from "../auth/oauth";
 import { verifyToken, JWTPayload } from "../auth/jwt";
+import { ADMIN_API_KEY } from "../config/env";
 
 type RequestUser = {
   id: string;
@@ -12,6 +13,48 @@ type RequestUser = {
 
 export interface AuthRequest extends Request {
   user?: RequestUser;
+}
+
+const SAFE_IMPERSONATION_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+function logImpersonationEvent(
+  event: "IMPERSONATION_MUTATION_BLOCKED",
+  req: Request,
+  claims: JWTPayload,
+): void {
+  console.warn("[IMPERSONATION]", {
+    event,
+    actorUserId: claims.impersonation?.actorUserId,
+    actorRole: claims.impersonation?.actorRole,
+    impersonatedUserId: claims.userId,
+    reason: claims.impersonation?.reason,
+    method: req.method,
+    path: req.originalUrl,
+    ip: req.ip,
+    userAgent: req.get("user-agent"),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function rejectMutationDuringImpersonation(
+  req: Request,
+  res: Response,
+  claims: JWTPayload,
+): boolean {
+  if (
+    claims.impersonation?.active &&
+    claims.impersonation.readOnly &&
+    !SAFE_IMPERSONATION_METHODS.has(req.method.toUpperCase())
+  ) {
+    logImpersonationEvent("IMPERSONATION_MUTATION_BLOCKED", req, claims);
+    res.status(403).json({
+      error: "Impersonation session is read-only",
+      message: "Mutations are disabled while impersonating a user",
+    });
+    return true;
+  }
+
+  return false;
 }
 
 declare module "express-serve-static-core" {
@@ -34,13 +77,15 @@ export const requireAuth = (
   next: NextFunction,
 ) => {
   const apiKey = req.header("X-API-Key");
-  const adminKey = process.env.ADMIN_API_KEY || "dev-admin-key";
+  const adminKey = ADMIN_API_KEY;
 
   if (apiKey && apiKey === adminKey) {
     (req as AuthRequest).user = {
       id: "admin-system",
       role: "admin",
     };
+    // Issue #518: Admin keys get full permissions
+    (req as any).apiKeyPermissions = 0x0f; // ApiKeyPermission.ALL
 
     return next();
   }
@@ -95,6 +140,9 @@ export function authenticateToken(
 
   try {
     const decoded = verifyToken(token);
+    if (rejectMutationDuringImpersonation(req, res, decoded)) {
+      return;
+    }
     req.jwtUser = decoded;
     next();
   } catch (error) {
@@ -143,6 +191,9 @@ export function optionalAuthentication(
 
   try {
     const decoded = verifyToken(token);
+    if (rejectMutationDuringImpersonation(req, res, decoded)) {
+      return;
+    }
     req.jwtUser = decoded;
   } catch {
     // Silently ignore token errors for optional authentication
@@ -150,4 +201,19 @@ export function optionalAuthentication(
   }
 
   next();
+}
+
+export async function verifyTokenStateful(token: string): Promise<JWTPayload> {
+  // Run standard cryptographic verification
+  const decoded = verifyToken(token);
+  
+  // Fast Redis check to ensure token wasn't issued before a password change
+  if (redisClient.isOpen && decoded.userId && decoded.iat) {
+    const invalidatedAt = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
+    if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
+      throw new Error("Token has been revoked due to password change");
+    }
+  }
+  
+  return decoded;
 }

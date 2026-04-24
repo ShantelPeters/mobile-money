@@ -9,6 +9,14 @@ import type {
 import type { GraphQLContext } from "./context";
 import { mapTransactionRow, type MappedTransaction } from "./transactionMapper";
 import { TransactionStatus } from "../models/transaction";
+import { createSubscriptionResolvers } from "./subscriptionResolvers";
+import {
+  SubscriptionChannels,
+  type TransactionCreatedPayload,
+  type DisputeCreatedPayload,
+  type DisputeUpdatedPayload,
+  type DisputeNoteAddedPayload,
+} from "./subscriptions";
 
 const VALID_DISPUTE_STATUSES: DisputeStatus[] = [
   "open",
@@ -68,7 +76,9 @@ function toGraphQLError(err: unknown, fallback: string): GraphQLError {
     lower.includes("cannot assign") ||
     lower.includes("only allowed for completed")
   ) {
-    return new GraphQLError(message, { extensions: { code: "BAD_USER_INPUT" } });
+    return new GraphQLError(message, {
+      extensions: { code: "BAD_USER_INPUT" },
+    });
   }
   return new GraphQLError(message, { extensions: { code: "INTERNAL" } });
 }
@@ -154,7 +164,13 @@ export const resolvers = {
 
     disputeReport: async (
       _parent: unknown,
-      args: { filter?: { from?: string | null; to?: string | null; assignedTo?: string | null } | null },
+      args: {
+        filter?: {
+          from?: string | null;
+          to?: string | null;
+          assignedTo?: string | null;
+        } | null;
+      },
       ctx: GraphQLContext,
     ) => {
       const filter: ReportFilter = {};
@@ -227,7 +243,10 @@ export const resolvers = {
       },
       ctx: GraphQLContext,
     ) => {
-      const { amount, phoneNumber, provider, stellarAddress } = args.input;
+      const { amount, phoneNumber, stellarAddress } = args.input;
+
+      const provider = args.input.provider?.toLowerCase();
+
       try {
         return await ctx.lockManager.withLock(
           ctx.LockKeys.phoneNumber(phoneNumber),
@@ -252,6 +271,25 @@ export const resolvers = {
             const mapped = mapTransactionRow(
               transaction as unknown as Record<string, unknown>,
             );
+
+            // Publish transaction created event
+            const createdPayload: TransactionCreatedPayload = {
+              id: mapped.id,
+              referenceNumber: mapped.referenceNumber,
+              type: "deposit",
+              amount: String(mapped.amount),
+              phoneNumber: mapped.phoneNumber,
+              provider: mapped.provider,
+              stellarAddress: mapped.stellarAddress,
+              status: "pending",
+              tags: mapped.tags,
+              createdAt: mapped.createdAt,
+            };
+            ctx.pubsub.publish(
+              SubscriptionChannels.TRANSACTION_CREATED,
+              createdPayload,
+            );
+
             return {
               transactionId: mapped.id,
               referenceNumber: mapped.referenceNumber,
@@ -309,6 +347,25 @@ export const resolvers = {
         const mapped = mapTransactionRow(
           transaction as unknown as Record<string, unknown>,
         );
+
+        // Publish transaction created event
+        const createdPayload: TransactionCreatedPayload = {
+          id: mapped.id,
+          referenceNumber: mapped.referenceNumber,
+          type: "withdraw",
+          amount: String(mapped.amount),
+          phoneNumber: mapped.phoneNumber,
+          provider: mapped.provider,
+          stellarAddress: mapped.stellarAddress,
+          status: "pending",
+          tags: mapped.tags,
+          createdAt: mapped.createdAt,
+        };
+        ctx.pubsub.publish(
+          SubscriptionChannels.TRANSACTION_CREATED,
+          createdPayload,
+        );
+
         return {
           transactionId: mapped.id,
           referenceNumber: mapped.referenceNumber,
@@ -343,6 +400,21 @@ export const resolvers = {
           reason.trim(),
           reportedBy ?? undefined,
         );
+
+        // Publish dispute created event
+        const createdPayload: DisputeCreatedPayload = {
+          id: d.id,
+          transactionId: d.transactionId,
+          reason: d.reason,
+          status: d.status,
+          reportedBy: d.reportedBy,
+          createdAt: d.createdAt.toISOString(),
+        };
+        ctx.pubsub.publish(
+          SubscriptionChannels.DISPUTE_CREATED,
+          createdPayload,
+        );
+
         return formatDispute(d);
       } catch (err) {
         throw toGraphQLError(err, "Failed to open dispute");
@@ -376,6 +448,20 @@ export const resolvers = {
           assignedTo ?? undefined,
         );
         const full = await ctx.disputeService.getDispute(disputeId);
+
+        // Publish dispute updated event
+        const updatedPayload: DisputeUpdatedPayload = {
+          id: full.id,
+          status: full.status,
+          assignedTo: full.assignedTo,
+          resolution: full.resolution,
+          updatedAt: full.updatedAt.toISOString(),
+        };
+        ctx.pubsub.publish(
+          SubscriptionChannels.DISPUTE_UPDATED,
+          updatedPayload,
+        );
+
         return formatDispute(full);
       } catch (err) {
         throw toGraphQLError(err, "Failed to update dispute");
@@ -396,6 +482,20 @@ export const resolvers = {
       try {
         await ctx.disputeService.assignToAgent(disputeId, agentName.trim());
         const full = await ctx.disputeService.getDispute(disputeId);
+
+        // Publish dispute updated event
+        const updatedPayload: DisputeUpdatedPayload = {
+          id: full.id,
+          status: full.status,
+          assignedTo: full.assignedTo,
+          resolution: full.resolution,
+          updatedAt: full.updatedAt.toISOString(),
+        };
+        ctx.pubsub.publish(
+          SubscriptionChannels.DISPUTE_UPDATED,
+          updatedPayload,
+        );
+
         return formatDispute(full);
       } catch (err) {
         throw toGraphQLError(err, "Failed to assign dispute");
@@ -426,6 +526,20 @@ export const resolvers = {
           author.trim(),
           note.trim(),
         );
+
+        // Publish dispute note added event
+        const notePayload: DisputeNoteAddedPayload = {
+          id: created.id,
+          disputeId: created.disputeId,
+          author: created.author,
+          note: created.note,
+          createdAt: created.createdAt.toISOString(),
+        };
+        ctx.pubsub.publish(
+          SubscriptionChannels.DISPUTE_NOTE_ADDED,
+          notePayload,
+        );
+
         return formatNote(created);
       } catch (err) {
         throw toGraphQLError(err, "Failed to add note");
@@ -445,3 +559,17 @@ export const resolvers = {
     },
   },
 };
+
+// Create subscription resolvers with shared pubsub
+let subscriptionPubSub: any;
+function getSubscriptionPubSub() {
+  if (!subscriptionPubSub) {
+    const { PubSub } = require("graphql-subscriptions");
+    subscriptionPubSub = new PubSub();
+  }
+  return subscriptionPubSub;
+}
+
+export const subscriptionResolvers = createSubscriptionResolvers(
+  getSubscriptionPubSub(),
+);

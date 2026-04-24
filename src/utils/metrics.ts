@@ -43,6 +43,22 @@ export const transactionErrorsTotal = new Counter({
   registers: [register],
 });
 
+export const providerResponseTimeSeconds = new Histogram({
+  name: "provider_response_time_seconds",
+  help: "Duration of provider operations in seconds",
+  labelNames: ["provider", "operation", "status"],
+  buckets: [0.1, 0.3, 0.5, 1, 3, 5, 10, 30],
+  registers: [register],
+});
+
+export const providerResponseTimeSummary = new Summary({
+  name: "provider_response_time_summary",
+  help: "Summary of provider operation durations in seconds",
+  labelNames: ["provider", "operation"],
+  percentiles: [0.5, 0.9, 0.95, 0.99],
+  registers: [register],
+});
+
 // Failover metrics
 export const providerFailoverTotal = new Counter({
   name: "provider_failover_total",
@@ -58,6 +74,28 @@ export const providerFailoverAlerts = new Counter({
   registers: [register],
 });
 
+export const providerCircuitBreakerTransitionsTotal = new Counter({
+  name: "provider_circuit_breaker_transitions_total",
+  help: "Total number of provider circuit breaker state transitions",
+  labelNames: ["provider", "operation", "state"],
+  registers: [register],
+});
+
+export const providerCircuitBreakerState = new Gauge({
+  name: "provider_circuit_breaker_state",
+  help: "Current provider circuit breaker state (0=closed, 0.5=half_open, 1=open)",
+  labelNames: ["provider", "operation"],
+  registers: [register],
+});
+
+export const healthCheckResponseTimeSeconds = new Histogram({
+  name: "health_check_response_time_seconds",
+  help: "Duration of provider health checks in seconds",
+  labelNames: ["provider", "status"],
+  buckets: [0.05, 0.1, 0.3, 0.5, 1, 3, 5, 10],
+  registers: [register],
+});
+
 // Connection Metrics
 export const activeConnections = new Gauge({
   name: "active_connections",
@@ -66,3 +104,26 @@ export const activeConnections = new Gauge({
 });
 
 export { register };
+
+// Cache Metrics
+export const cacheHitsTotal = new Counter({
+  name: "cache_hits_total",
+  help: "Total number of cache hits",
+  labelNames: ["route"],
+  registers: [register],
+});
+
+export const cacheMissesTotal = new Counter({
+  name: "cache_misses_total",
+  help: "Total number of cache misses",
+  labelNames: ["route"],
+  registers: [register],
+});
+
+// A gauge that mirrors the hit ratio for easier scraping; updated on each hit/miss
+export const cacheHitRatio = new Gauge({
+  name: "cache_hit_ratio",
+  help: "Cache hit ratio (hits / (hits+misses))",
+  labelNames: ["route"],
+  registers: [register],
+});
