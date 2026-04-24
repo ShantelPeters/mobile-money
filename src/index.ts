@@ -10,6 +10,8 @@ import fs from "fs";
 import path from "path";
 import session from "express-session";
 import * as Sentry from "@sentry/node";
+import { register } from "prom-client";
+import { startStellarExporter } from "./services/stellarExporter";
 
 import {
   apiVersionMiddleware,
@@ -362,6 +364,16 @@ app.use("/sep38", sep38Router);
 app.use("/sep12", createSep12Router(pool));
 app.use("/.well-known/stellar.toml", tomlRouter);
 
+// Prometheus Metrics Scraper Endpoint
+app.get("/metrics", async (req: Request, res: Response) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (ex) {
+    res.status(500).end(String(ex));
+  }
+});
+
 app.use(
   (
     err: Error & { type?: string },
@@ -484,6 +496,9 @@ async function initializeRuntime(): Promise<void> {
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler");
   startJobs();
+
+  // Initialize Prometheus Horizon Scraper
+  startStellarExporter();
 
   const { getQueueHealth, pauseQueueEndpoint, resumeQueueEndpoint } =
     await import("./queue/health");
