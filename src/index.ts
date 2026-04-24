@@ -56,7 +56,7 @@ import {
 } from "./config/redis";
 import { createOAuthRouter } from "./auth/oauth";
 import { applySecurityMiddleware } from "./config/express";
-import { pool } from "./config/database";
+import { pool, checkDRHealth, isDRMode } from "./config/database";
 import {
   globalTimeout,
   haltOnTimedout,
@@ -247,6 +247,13 @@ app.get("/ready", async (_req: Request, res: Response) => {
   } catch (err) {
     console.error("Redis check failed", err);
     allReady = false;
+  }
+
+  // DR replica health (informational — does not affect readiness)
+  const drHealth = await checkDRHealth();
+  if (drHealth !== null) {
+    checks.dr_replica = drHealth.healthy ? "ok" : "degraded";
+    checks.dr_mode = isDRMode() ? "active" : "standby";
   }
 
   const body: ReadinessCheckResponse = {

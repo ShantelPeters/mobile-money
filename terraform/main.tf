@@ -36,6 +36,21 @@ provider "aws" {
   }
 }
 
+# DR provider — second region for cross-region replica
+provider "aws" {
+  alias  = "dr"
+  region = var.dr_region
+
+  default_tags {
+    tags = {
+      Project     = var.project
+      Environment = var.environment
+      ManagedBy   = "terraform"
+      Role        = "dr"
+    }
+  }
+}
+
 # ── 1. Networking ──────────────────────────────────────────────────────────
 module "vpc" {
   source = "./modules/vpc"
@@ -60,6 +75,11 @@ module "security" {
 module "database" {
   source = "./modules/database"
 
+  providers = {
+    aws    = aws
+    aws.dr = aws.dr
+  }
+
   project              = var.project
   environment          = var.environment
   private_subnet_ids   = module.vpc.private_subnet_ids
@@ -70,6 +90,13 @@ module "database" {
   db_username          = var.db_username
   db_password          = var.db_password
   db_multi_az          = var.db_multi_az
+
+  # DR
+  dr_replica_enabled        = var.dr_replica_enabled
+  dr_region                 = var.dr_region
+  dr_replica_instance_class = var.dr_replica_instance_class
+  dr_private_subnet_ids     = var.dr_private_subnet_ids
+  dr_security_group_id      = var.dr_security_group_id
 }
 
 # ── 4. Managed Redis (ElastiCache) ────────────────────────────────────────
