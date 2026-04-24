@@ -39,6 +39,7 @@ import { vaultRoutes } from "./routes/vaults";
 import { adminRoutes } from "./routes/admin";
 import { makerCheckerRoutes } from "./routes/makerChecker";
 import { userRoutes } from "./routes/users";
+import { priceHistoryRoutes } from "./routes/priceHistory";
 import { errorHandler } from "./middleware/errorHandler";
 import {
   connectRedis,
@@ -318,6 +319,7 @@ app.use("/api/v1/transactions/bulk", bulkRoutesV1);
 app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
+app.use("/api/v1/prices", priceHistoryRoutes);
 
 const deprecatedApiV1Handler: express.RequestHandler = (req, res, next) => {
   const versionedReq = req as VersionedRequest;
