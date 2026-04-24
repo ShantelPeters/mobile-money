@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { runAccountMergeJob } from "./accountMerge";
 import { runCleanupJob } from "./cleanupJob";
+import { runMonthlyInvoiceJob } from "./invoiceJob";
 import { runReportJob } from "./reportJob";
 import { runStatusCheckJob } from "./statusCheckJob";
 import { runDisputeSlaJob } from "./disputeSlaJob";
@@ -72,6 +73,12 @@ const JOBS: JobConfig[] = [
     // Every 5 minutes - polls provider APIs for uptime and alerts on outages
     schedule: process.env.PROVIDER_HEALTH_CHECK_CRON || "*/5 * * * *",
     handler: runProviderHealthCheckJob,
+  },
+  {
+    name: "monthly-invoice",
+    // 1st of every month at midnight
+    schedule: "0 0 1 * *",
+    handler: runMonthlyInvoiceJob,
   },
 ];
 
