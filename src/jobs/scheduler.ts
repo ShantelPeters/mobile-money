@@ -13,6 +13,7 @@ import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
+import { runSnapshotJob } from "./snapshotJob";
 
 interface JobConfig {
   name: string;
@@ -86,6 +87,12 @@ const JOBS: JobConfig[] = [
     // Every 15 minutes - auto-transfers between providers when one runs low
     schedule: process.env.LIQUIDITY_REBALANCE_CRON || "*/15 * * * *",
     handler: runLiquidityRebalanceJob,
+  },
+  {
+    name: "daily-snapshot",
+    // Daily at 23:59:59 - snapshots balances and volume for reporting
+    schedule: process.env.DAILY_SNAPSHOT_CRON || "59 59 23 * * *",
+    handler: runSnapshotJob,
   },
 ];
 
