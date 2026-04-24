@@ -1,11 +1,12 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { generateToken } from "../auth/jwt";
-import { updateAdminNotesHandler } from "../controllers/transactionController";
+import { updateAdminNotesHandler, refundTransactionHandler } from "../controllers/transactionController";
 import {
   DashboardConfig,
   validateDashboardConfig,
   DASHBOARD_CONFIG_VALIDATION_ERRORS,
 } from "../utils/dashboardConfig";
+import { auditInterceptor } from "../middleware/auditInterceptor";
 import {
   rateLimitExport,
   rateLimitListQueries,
@@ -14,8 +15,9 @@ import {
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
-import { checkReplicaHealth } from "../config/database";
+import { checkReplicaHealth, pool} from "../config/database";
 import { UserModel } from "../models/users";
+import { TransactionModel } from "../models/transaction";
 import multer from "multer";
 import {
   parseCSV,
@@ -28,12 +30,14 @@ import {
   getDisputeResolutionTrends,
 } from "../services/metrics";
 import { dlqInspectorHandler } from "../queue/dlq";
+import { triggerManualTransfer, getLiquidityTransfers } from "../services/liquidityTransferService";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
 const IMPERSONATION_TOKEN_TTL_MS = 15 * 60 * 1000;
-const READ_ONLY_IMPERSONATION_MESSAGE =
-  "This token is read-only and cannot be used for mutations.";
+const READ_ONLY_IMPERSONATION_MESSAGE = "Read-only mode active";
+
+router.use(auditInterceptor(pool));
 
 // Multer configuration for CSV uploads
 const csvUpload = multer({
@@ -73,7 +77,7 @@ interface AuthRequest extends Request {
  * Mock services (replace with real DB/services)
  */
 const users: User[] = [];
-const transactions: Transaction[] = [];
+const transactionModel = new TransactionModel();
 
 const isAdminRole = (role?: string) =>
   role === "admin" || role === "super-admin";
@@ -653,13 +657,35 @@ router.get(
   "/transactions",
   requireAdmin,
   logAdminAction("LIST_TRANSACTIONS"),
-  (req: Request, res: Response) => {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 10;
+  async (req: Request, res: Response) => {
+    try {
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 10;
+      const reference = req.query.reference as string | undefined;
 
-    const result = paginate(transactions, page, limit);
+      const offset = (page - 1) * limit;
 
-    res.json(result);
+      const filters: any = {};
+      if (reference) {
+        filters.referenceNumber = reference;
+      }
+
+      const transactions = await transactionModel.list(limit, offset, undefined, undefined, filters);
+      const total = await transactionModel.count(undefined, undefined, filters);
+
+      res.json({
+        data: transactions,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
+    } catch (err) {
+      console.error("Error listing transactions for admin:", err);
+      res.status(500).json({ error: "Failed to list transactions" });
+    }
   },
 );
 
@@ -669,16 +695,29 @@ router.put(
   requireAdmin,
   rateLimitListQueries,
   logAdminAction("UPDATE_TRANSACTION"),
-  (req: Request, res: Response) => {
-    const tx = transactions.find((t) => t.id === req.params.id);
+  async (req: Request, res: Response) => {
+    try {
+      const tx = await transactionModel.findById(req.params.id);
 
-    if (!tx) {
-      return res.status(404).json({ message: "Transaction not found" });
+      if (!tx) {
+        return res.status(404).json({ message: "Transaction not found" });
+      }
+
+      // Basic update logic - in a real app this would be more specific
+      if (req.body.admin_notes) {
+        await transactionModel.updateAdminNotes(req.params.id, req.body.admin_notes);
+      }
+      
+      if (req.body.status) {
+        await transactionModel.updateStatus(req.params.id, req.body.status);
+      }
+
+      const updatedTx = await transactionModel.findById(req.params.id);
+      res.json({ message: "Transaction updated", transaction: updatedTx });
+    } catch (err) {
+      console.error("Error updating transaction:", err);
+      res.status(500).json({ error: "Failed to update transaction" });
     }
-
-    Object.assign(tx, req.body);
-
-    res.json({ message: "Transaction updated", transaction: tx });
   },
 );
 
@@ -690,6 +729,14 @@ router.patch(
   updateAdminNotesHandler,
 );
 
+// POST /api/admin/transactions/:id/refund
+router.post(
+  "/transactions/:id/refund",
+  requireAdmin,
+  logAdminAction("REFUND_TRANSACTION"),
+  refundTransactionHandler,
+);
+
 /**
  * =========================
  * QUEUES & DLQ
@@ -698,6 +745,61 @@ router.patch(
 
 // GET /api/admin/queues/dlq
 router.get("/queues/dlq", requireAdmin, logAdminAction("VIEW_DLQ"), dlqInspectorHandler);
+
+/**
+ * =========================
+ * LIQUIDITY MANAGEMENT
+ * =========================
+ */
+
+// GET /api/admin/liquidity/transfers
+router.get(
+  "/liquidity/transfers",
+  requireAdmin,
+  logAdminAction("LIST_LIQUIDITY_TRANSFERS"),
+  async (req: Request, res: Response) => {
+    try {
+      const limit = Number(req.query.limit) || 50;
+      const offset = Number(req.query.offset) || 0;
+      const transfers = await getLiquidityTransfers(limit, offset);
+      res.json({ transfers });
+    } catch (err) {
+      console.error("[liquidity] Failed to list transfers:", err);
+      res.status(500).json({ message: "Failed to retrieve liquidity transfers" });
+    }
+  },
+);
+
+// POST /api/admin/liquidity/transfers
+router.post(
+  "/liquidity/transfers",
+  requireAdmin,
+  logAdminAction("MANUAL_LIQUIDITY_TRANSFER"),
+  async (req: Request, res: Response) => {
+    try {
+      const { fromProvider, toProvider, amount, note } = req.body;
+      const admin = (req as AuthRequest).user;
+
+      if (!admin) return res.status(401).json({ message: "Authentication required" });
+      if (!fromProvider || !toProvider || !amount) {
+        return res.status(400).json({ message: "fromProvider, toProvider, and amount are required" });
+      }
+      if (fromProvider === toProvider) {
+        return res.status(400).json({ message: "fromProvider and toProvider must be different" });
+      }
+      if (typeof amount !== "number" || amount <= 0) {
+        return res.status(400).json({ message: "amount must be a positive number" });
+      }
+
+      const result = await triggerManualTransfer(fromProvider, toProvider, amount, admin.id, note);
+      res.status(201).json({ message: "Transfer initiated", ...result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Transfer failed";
+      console.error("[liquidity] Manual transfer error:", err);
+      res.status(400).json({ message: msg });
+    }
+  },
+);
 
 /**
  * =========================
@@ -856,5 +958,218 @@ router.get(
   },
 );
 
-export { router as adminRoutes };
+/**
+ * =========================
+ * FINANCIAL DASHBOARD
+ * =========================
+ */
 
+// GET /api/admin/financial/pnl - last 30 days of daily PnL snapshots
+router.get(
+  "/financial/pnl",
+  requireAdmin,
+  async (_req: Request, res: Response) => {
+    try {
+      const { queryRead } = await import("../config/database");
+      const result = await queryRead<{
+        report_date: string;
+        user_fees: string;
+        provider_fees: string;
+        pnl: string;
+      }>(
+        `SELECT report_date, user_fees, provider_fees, pnl
+         FROM daily_pnl_snapshots
+         WHERE report_date >= CURRENT_DATE - INTERVAL '29 days'
+         ORDER BY report_date ASC`,
+        [],
+      );
+
+      const rows = result.rows.map((r) => ({
+        date: r.report_date,
+        feesCollected: parseFloat(r.user_fees),
+        providerCosts: parseFloat(r.provider_fees),
+        netProfit: parseFloat(r.pnl),
+      }));
+
+      const totals = rows.reduce(
+        (acc, r) => ({
+          feesCollected: acc.feesCollected + r.feesCollected,
+          providerCosts: acc.providerCosts + r.providerCosts,
+          netProfit: acc.netProfit + r.netProfit,
+        }),
+        { feesCollected: 0, providerCosts: 0, netProfit: 0 },
+      );
+
+      res.json({ rows, totals });
+    } catch (err) {
+      console.error("[financial/pnl]", err);
+      res.status(500).json({ error: "Failed to fetch PnL data" });
+    }
+  },
+);
+
+// GET /api/admin/financial/dashboard - self-contained HTML dashboard
+router.get(
+  "/financial/dashboard",
+  requireAdmin,
+  (_req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Financial Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}
+  h1{font-size:1.4rem;font-weight:600;margin-bottom:20px;color:#f8fafc}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px}
+  .card{background:#1e293b;border-radius:10px;padding:20px}
+  .card .label{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+  .card .value{font-size:1.6rem;font-weight:700}
+  .green{color:#34d399}.red{color:#f87171}.blue{color:#60a5fa}
+  .chart-box{background:#1e293b;border-radius:10px;padding:20px}
+  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px;font-weight:500}
+  #status{font-size:.75rem;color:#64748b;margin-top:14px;text-align:right}
+  .error{color:#f87171;padding:20px;background:#1e293b;border-radius:10px}
+</style>
+</head>
+<body>
+<h1>Financial Health — Last 30 Days</h1>
+<div class="cards">
+  <div class="card"><div class="label">Fees Collected</div><div class="value green" id="totalFees">—</div></div>
+  <div class="card"><div class="label">Provider Costs</div><div class="value red" id="totalCosts">—</div></div>
+  <div class="card"><div class="label">Net Profit</div><div class="value blue" id="totalProfit">—</div></div>
+</div>
+<div class="chart-box">
+  <h2>Daily Breakdown</h2>
+  <canvas id="chart" height="90"></canvas>
+</div>
+<div class="chart-box" style="margin-top: 24px;">
+  <h2>Transaction Search</h2>
+  <div style="display:flex;gap:8px;margin-bottom:16px;">
+    <input type="text" id="txSearch" placeholder="Enter Transaction Reference..." style="flex:1;background:#0f172a;border:1px solid #334155;color:#f8fafc;padding:8px 12px;border-radius:6px;">
+    <button onclick="searchTx()" style="background:#3b82f6;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">Search</button>
+  </div>
+  <div id="txResults" style="font-size:0.85rem;">
+    <table style="width:100%;border-collapse:collapse;display:none;margin-top:10px;" id="txTable">
+      <thead>
+        <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #334155;">
+          <th style="padding:8px 4px;">Reference</th>
+          <th style="padding:8px 4px;">Type</th>
+          <th style="padding:8px 4px;">Amount</th>
+          <th style="padding:8px 4px;">Status</th>
+          <th style="padding:8px 4px;">Date</th>
+        </tr>
+      </thead>
+      <tbody id="txBody"></tbody>
+    </table>
+    <div id="txEmpty" style="color:#64748b;text-align:center;padding:20px;">Enter a reference number to search</div>
+  </div>
+</div>
+<div id="status"></div>
+<script>
+const fmt = (n) => '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+async function load() {
+  try {
+    const r = await fetch('/api/admin/financial/pnl', {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const {rows, totals} = await r.json();
+
+    document.getElementById('totalFees').textContent = fmt(totals.feesCollected);
+    document.getElementById('totalCosts').textContent = fmt(totals.providerCosts);
+    document.getElementById('totalProfit').textContent = fmt(totals.netProfit);
+    document.getElementById('totalProfit').className = 'value ' + (totals.netProfit >= 0 ? 'green' : 'red');
+
+    const labels = rows.map(r => r.date);
+    new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {label:'Fees Collected', data: rows.map(r=>r.feesCollected), backgroundColor:'rgba(52,211,153,.7)', borderRadius:3},
+          {label:'Provider Costs', data: rows.map(r=>r.providerCosts), backgroundColor:'rgba(248,113,113,.7)', borderRadius:3},
+          {label:'Net Profit', data: rows.map(r=>r.netProfit), type:'line', borderColor:'#60a5fa', backgroundColor:'rgba(96,165,250,.15)', tension:.3, fill:true, pointRadius:3},
+        ]
+      },
+      options: {
+        responsive:true,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{labels:{color:'#94a3b8',font:{size:12}}}},
+        scales:{
+          x:{ticks:{color:'#64748b',maxRotation:45},grid:{color:'rgba(255,255,255,.05)'}},
+          y:{ticks:{color:'#64748b',callback:v=>'\$'+v.toLocaleString()},grid:{color:'rgba(255,255,255,.05)'}}
+        }
+      }
+    });
+
+    document.getElementById('status').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.querySelector('.chart-box').innerHTML = '<div class="error">Failed to load data: ' + e.message + '</div>';
+  }
+}
+
+async function searchTx() {
+  const ref = document.getElementById('txSearch').value.trim();
+  if (!ref) return;
+  
+  const table = document.getElementById('txTable');
+  const body = document.getElementById('txBody');
+  const empty = document.getElementById('txEmpty');
+  
+  empty.textContent = 'Searching...';
+  empty.style.display = 'block';
+  table.style.display = 'none';
+  
+  try {
+    const r = await fetch('/api/admin/transactions?reference=' + encodeURIComponent(ref), {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const {data} = await r.json();
+    
+    if (!data || data.length === 0) {
+      empty.textContent = 'No transaction found with reference: ' + ref;
+      return;
+    }
+    
+    body.innerHTML = '';
+    data.forEach(tx => {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid #1e293b';
+      const statusBg = tx.status === 'completed' ? 'rgba(52,211,153,.2)' : 
+                       tx.status === 'pending' ? 'rgba(250,204,21,.2)' : 
+                       tx.status === 'failed' ? 'rgba(248,113,113,.2)' : 'rgba(148,163,184,.2)';
+      const statusColor = tx.status === 'completed' ? '#34d399' : 
+                         tx.status === 'pending' ? '#fbbf24' : 
+                         tx.status === 'failed' ? '#f87171' : '#94a3b8';
+      
+      tr.innerHTML = \`
+        <td style="padding:12px 4px;font-family:monospace;color:#60a5fa">\${tx.referenceNumber}</td>
+        <td style="padding:12px 4px;text-transform:capitalize;">\${tx.type}</td>
+        <td style="padding:12px 4px;font-weight:600;">\${tx.amount}</td>
+        <td style="padding:12px 4px;"><span style="padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;background:\${statusBg};color:\${statusColor}">\${tx.status.toUpperCase()}</span></td>
+        <td style="padding:12px 4px;color:#64748b">\${new Date(tx.createdAt).toLocaleDateString()}</td>
+      \`;
+      body.appendChild(tr);
+    });
+    
+    table.style.display = 'table';
+    empty.style.display = 'none';
+  } catch (e) {
+    empty.textContent = 'Error: ' + e.message;
+  }
+}
+
+document.getElementById('txSearch').onkeydown = (e) => { if(e.key === 'Enter') searchTx(); };
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>`);
+  },
+);
+
+export { router as adminRoutes };

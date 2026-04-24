@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyOAuthAccessToken } from "../auth/oauth";
 import { verifyToken, JWTPayload } from "../auth/jwt";
+import { ADMIN_API_KEY } from "../config/env";
+import { redisClient } from "../config/redis";
 
 type RequestUser = {
   id: string;
@@ -76,13 +78,15 @@ export const requireAuth = (
   next: NextFunction,
 ) => {
   const apiKey = req.header("X-API-Key");
-  const adminKey = process.env.ADMIN_API_KEY || "dev-admin-key";
+  const adminKey = ADMIN_API_KEY;
 
   if (apiKey && apiKey === adminKey) {
     (req as AuthRequest).user = {
       id: "admin-system",
       role: "admin",
     };
+    // Issue #518: Admin keys get full permissions
+    (req as any).apiKeyPermissions = 0x0f; // ApiKeyPermission.ALL
 
     return next();
   }
@@ -198,4 +202,20 @@ export function optionalAuthentication(
   }
 
   next();
+}
+
+export async function verifyTokenStateful(token: string): Promise<JWTPayload> {
+  // Run standard cryptographic verification
+  const decoded = verifyToken(token);
+  
+  // Fast Redis check to ensure token wasn't issued before a password change
+  if (redisClient.isOpen && decoded.userId && decoded.iat) {
+    const invalidatedAtRaw = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
+    const invalidatedAt = invalidatedAtRaw ? String(invalidatedAtRaw) : null;
+    if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
+      throw new Error("Token has been revoked due to password change");
+    }
+  }
+  
+  return decoded;
 }

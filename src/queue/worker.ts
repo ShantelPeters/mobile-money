@@ -11,6 +11,7 @@ import { EmailService } from "../services/email";
 import { UserModel } from "../models/users";
 import { withRetry } from "../services/retry";
 import { WhatsappService } from "../services/whatsapp";
+import { SmsService } from "../services/sms";
 import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
 import { pushNotificationService } from "../services/push";
 import { capturePersistentFailure } from "./dlq";
@@ -20,6 +21,7 @@ const stellarService = new StellarService();
 const emailService = new EmailService();
 const userModel = new UserModel();
 const whatsappService = new WhatsappService();
+const smsService = new SmsService();
 const webhookService = new WebhookService();
 const pushService = pushNotificationService;
 
@@ -147,6 +149,7 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
   const retryConfig = {
     maxAttempts,
     baseDelayMs,
+    provider,
     onRetry: async ({
       attempt,
       error,
@@ -168,6 +171,14 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
   ) => {
     try {
       const txRow = await transactionModel.findById(transactionId);
+      if (!txRow?.userId) return;
+
+      const user = await userModel.findById(txRow.userId);
+      if (user?.smsOptOut) {
+        console.log(`[${transactionId}] SMS notifications skipped (User Opted Out)`);
+        return;
+      }
+
       const ref = txRow?.referenceNumber ?? transactionId;
       await smsService.notifyTransactionEvent(phoneNumber, {
         referenceNumber: ref,
@@ -182,6 +193,26 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
     }
   };
 
+        const stellarResult = await withRetry(
+          () => stellarService.sendPayment(stellarAddress, amount),
+          retryConfig,
+        );
+
+        // Store Stellar transaction details in metadata
+        if (stellarResult.hash) {
+          const currentMetadata = (await transactionModel.findById(transactionId))?.metadata || {};
+          const updatedMetadata = {
+            ...currentMetadata,
+            stellar: {
+              transactionHash: stellarResult.hash,
+              submittedAt: stellarResult.submittedAt?.toISOString(),
+              feeBumps: [],
+            },
+          };
+          await transactionModel.updateMetadata(transactionId, updatedMetadata);
+        }
+
+        await updateProgress(transactionId, 90);
   try {
     await updateProgress(transactionId, 10);
 
@@ -199,6 +230,14 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
         }
         return result;
       }, retryConfig);
+
+      // Issue #515: Log provider response time in transaction metadata
+      if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
+        await transactionModel.patchMetadata(transactionId, {
+          providerResponseTimeMs: mobileMoneyResult.providerResponseTimeMs,
+          providerRespondedAt: new Date().toISOString(),
+        }).catch(err => console.warn(`[${transactionId}] Failed to log provider response time:`, err));
+      }
 
       await updateProgress(transactionId, 50);
 
@@ -250,6 +289,14 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
         }
         return result;
       }, retryConfig);
+
+      // Issue #515: Log provider response time in transaction metadata
+      if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
+        await transactionModel.patchMetadata(transactionId, {
+          providerResponseTimeMs: mobileMoneyResult.providerResponseTimeMs,
+          providerRespondedAt: new Date().toISOString(),
+        }).catch(err => console.warn(`[${transactionId}] Failed to log provider response time:`, err));
+      }
 
       await updateProgress(transactionId, 50);
 

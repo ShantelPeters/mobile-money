@@ -24,6 +24,7 @@ export interface TransactionFilters {
   offset: number;
   sortBy?: string;
   sortOrder?: "ASC" | "DESC";
+  reference?: string;
 }
 
 /**
@@ -82,7 +83,7 @@ export const validateTransactionFilters = (
   next: NextFunction
 ) => {
   try {
-    const { status, limit = 50, offset = 0 } = req.query;
+    const { status, limit = 50, offset = 0, reference } = req.query;
 
     // Validate limit
     const limitNum = parseInt(limit as string, 10);
@@ -120,6 +121,7 @@ export const validateTransactionFilters = (
       statuses,
       limit: cappedLimit,
       offset: offsetNum,
+      reference: reference as string | undefined,
     };
 
     next();

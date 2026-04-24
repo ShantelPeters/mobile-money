@@ -2,7 +2,14 @@ import { pool, queryRead, queryWrite } from "../config/database";
 import { generateReferenceNumber } from "../utils/referenceGenerator";
 import { encrypt, decrypt } from "../utils/encryption";
 import { WebSocketManager } from "../websocket";
+import { getRedisPubSub } from "../graphql/redisPubSub";
+import {
+  SubscriptionChannels,
+  transactionChannel,
+  type TransactionUpdatedPayload,
+} from "../graphql/subscriptions";
 
+export type AssetType = 'native' | 'credit_alphanum4' | 'credit_alphanum12';
 export enum TransactionStatus {
   Pending = "pending",
   Completed = "completed",
@@ -14,14 +21,17 @@ const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
 
 const MAX_METADATA_BYTES = 10240; // 10 KB
+const MAX_NOTES_LENGTH = 256;
 
 const TRANSACTION_SELECT_COLUMNS = `
   id,
   reference_number AS "referenceNumber",
+  provider_reference AS "providerReference",
   type,
   amount::text AS amount,
   phone_number AS "phoneNumber",
   provider,
+  provider_reference AS "providerReference",
   stellar_address AS "stellarAddress",
   status,
   COALESCE(tags, '{}') AS tags,
@@ -70,6 +80,7 @@ function validateMetadata(metadata: unknown): Record<string, unknown> {
 export interface Transaction {
   id: string;
   referenceNumber: string;
+  providerReference?: string | null;
   type: "deposit" | "withdraw";
   amount: string;
   /** ISO 4217 currency code of the original transaction amount (default: USD). */
@@ -82,6 +93,10 @@ export interface Transaction {
   provider: string;
   stellarAddress: string;
   status: TransactionStatus;
+  // NEW fields
+  assetType: AssetType;
+  assetCode?: string;   // e.g. 'USDC' — only for anchored assets
+  assetIssuer?: string; // issuer address — only for anchored assets
   tags: string[];
   notes?: string;
   adminNotes?: string;
@@ -113,6 +128,7 @@ export interface CreateTransactionInput {
   amount: string | number;
   phoneNumber: string;
   provider: string;
+  providerReference?: string | null;
   stellarAddress: string;
   status: TransactionStatus;
   tags?: string[];
@@ -148,29 +164,30 @@ export function mapTransactionRow(
   const dbRow = row as Record<string, unknown>;
   const created = dbRow.created_at ?? row.createdAt;
   const updated = dbRow.updated_at ?? row.updatedAt;
-  
+
   // Cast to any for easier access to snake_case fields that might be in the object
   const r = row as any;
   const db = dbRow as any;
 
   return {
     id: String(r.id),
-    referenceNumber: String(
-      db.reference_number ?? r.referenceNumber ?? "",
-    ),
+    referenceNumber: String(db.reference_number ?? r.referenceNumber ?? ""),
     type: (r.type as Transaction["type"]) || "deposit",
     amount: String(r.amount ?? ""),
-    phoneNumber: decrypt(String(db.phone_number ?? r.phoneNumber ?? "")) as string,
+    phoneNumber: decrypt(
+      String(db.phone_number ?? r.phoneNumber ?? ""),
+    ) as string,
     provider: String(r.provider ?? ""),
-    stellarAddress: decrypt(String(db.stellar_address ?? r.stellarAddress ?? "")) as string,
+    stellarAddress: decrypt(
+      String(db.stellar_address ?? r.stellarAddress ?? ""),
+    ) as string,
     status: r.status as TransactionStatus,
     tags: Array.isArray(r.tags) ? (r.tags as string[]) : [],
     notes: decrypt(db.notes ?? r.notes) ?? undefined,
-    admin_notes: decrypt(db.admin_notes ?? r.admin_notes ?? r.adminNotes) ?? undefined,
+    admin_notes:
+      decrypt(db.admin_notes ?? r.admin_notes ?? r.adminNotes) ?? undefined,
     metadata:
-      r.metadata &&
-      typeof r.metadata === "object" &&
-      !Array.isArray(r.metadata)
+      r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata)
         ? (r.metadata as Record<string, unknown>)
         : {},
     locationMetadata:
@@ -184,6 +201,19 @@ export function mapTransactionRow(
         ? String(db.user_id ?? r.userId)
         : null,
     retryCount: Number(db.retry_count ?? r.retryCount ?? 0),
+    // Add missing required properties with defaults
+    assetType: (r.asset_type ?? r.assetType ?? 'native') as AssetType,
+    assetCode: r.asset_code ?? r.assetCode ?? undefined,
+    assetIssuer: r.asset_issuer ?? r.assetIssuer ?? undefined,
+    currency: r.currency ?? 'USD',
+    originalAmount: r.original_amount ?? r.originalAmount ?? r.amount,
+    convertedAmount: r.converted_amount ?? r.convertedAmount ?? undefined,
+    idempotencyKey: r.idempotency_key ?? r.idempotencyKey ?? undefined,
+    idempotencyExpiresAt: r.idempotency_expires_at ?? r.idempotencyExpiresAt ? new Date(String(r.idempotency_expires_at ?? r.idempotencyExpiresAt)) : undefined,
+    webhook_delivery_status: r.webhook_delivery_status ?? undefined,
+    webhook_last_attempt_at: r.webhook_last_attempt_at ? new Date(String(r.webhook_last_attempt_at)) : undefined,
+    webhook_delivered_at: r.webhook_delivered_at ? new Date(String(r.webhook_delivered_at)) : undefined,
+    webhook_last_error: r.webhook_last_error ?? undefined,
     createdAt:
       created instanceof Date ? created : new Date(String(created ?? "")),
     updatedAt:
@@ -204,15 +234,16 @@ export class TransactionModel {
 
     const result = await queryWrite(
       `INSERT INTO transactions (
-           reference_number, type, amount, currency, original_amount, 
+           reference_number, provider_reference, type, amount, currency, original_amount, 
            converted_amount, phone_number, provider, stellar_address, 
            status, tags, notes, user_id, idempotency_key, 
            idempotency_expires_at, metadata, location_metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING *`,
       [
         referenceNumber,
+        data.providerReference ?? null,
         data.type,
         data.amount,
         data.currency ?? "USD",
@@ -220,6 +251,7 @@ export class TransactionModel {
         data.convertedAmount ?? null,
         encrypt(data.phoneNumber),
         data.provider,
+        data.providerReference ?? null,
         encrypt(data.stellarAddress),
         data.status,
         tags,
@@ -247,7 +279,7 @@ export class TransactionModel {
   }
 
   async findById(id: string): Promise<Transaction | null> {
-     const result = await queryRead<Transaction>(
+    const result = await queryRead<Transaction>(
       `SELECT ${TRANSACTION_SELECT_COLUMNS}
         FROM transactions
         WHERE id = $1`,
@@ -269,6 +301,8 @@ export class TransactionModel {
       minAmount?: number;
       maxAmount?: number;
       provider?: string;
+      providerReference?: string;
+      referenceNumber?: string;
       tags?: string[];
     },
   ) {
@@ -299,7 +333,15 @@ export class TransactionModel {
     }
     if (filters?.provider) {
       query += " AND provider = $" + p++;
-      params.push(filters.provider);
+      params.push(filters.provider.toLowerCase());
+    }
+    if (filters?.providerReference) {
+      query += " AND provider_reference = $" + p++;
+      params.push(filters.providerReference);
+    }
+    if (filters?.referenceNumber) {
+      query += " AND reference_number = $" + p++;
+      params.push(filters.referenceNumber);
     }
     if (filters?.tags && filters.tags.length > 0) {
       query += " AND tags @> $" + p++ + "::text[]";
@@ -323,6 +365,8 @@ export class TransactionModel {
       minAmount?: number;
       maxAmount?: number;
       provider?: string;
+      providerReference?: string;
+      referenceNumber?: string;
       tags?: string[];
     },
   ): Promise<number> {
@@ -350,7 +394,15 @@ export class TransactionModel {
     }
     if (filters?.provider) {
       query += " AND provider = $" + p++;
-      params.push(filters.provider);
+      params.push(filters.provider.toLowerCase());
+    }
+    if (filters?.providerReference) {
+      query += " AND provider_reference = $" + p++;
+      params.push(filters.providerReference);
+    }
+    if (filters?.referenceNumber) {
+      query += " AND reference_number = $" + p++;
+      params.push(filters.referenceNumber);
     }
     if (filters?.tags && filters.tags.length > 0) {
       query += " AND tags @> $" + p++ + "::text[]";
@@ -362,12 +414,12 @@ export class TransactionModel {
   }
 
   async updateStatus(id: string, status: TransactionStatus): Promise<void> {
-    const result = await queryWrite<{ user_id: string | null }>(
+    const result = await queryWrite<{ user_id: string | null; reference_number: string; updated_at: Date }>(
       `UPDATE transactions
        SET status = $1,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $2
-       RETURNING user_id`,
+       RETURNING user_id, reference_number, updated_at`,
       [status, id],
     );
 
@@ -375,6 +427,37 @@ export class TransactionModel {
       return;
     }
 
+    const row = result.rows[0];
+
+    // ── Publish GraphQL subscription event ──────────────────────────────
+    // Publish to both the per-transaction channel (targeted) and the
+    // broadcast channel (for clients watching all transactions).
+    const pubsub = getRedisPubSub();
+    const now = row.updated_at?.toISOString() ?? new Date().toISOString();
+
+    const payload: TransactionUpdatedPayload = {
+      id,
+      referenceNumber: row.reference_number,
+      status,
+      updatedAt: now,
+    };
+
+    // Per-transaction channel — clients subscribed to transactionUpdated(id: $id)
+    pubsub.publish(transactionChannel(id), payload).catch((err) => {
+      console.error(`[pubsub] Failed to publish ${transactionChannel(id)}`, err);
+    });
+
+    // Broadcast channels for status-specific subscriptions
+    if (status === TransactionStatus.Completed) {
+      pubsub.publish(SubscriptionChannels.TRANSACTION_COMPLETED, payload).catch(() => {});
+    } else if (status === TransactionStatus.Failed) {
+      pubsub.publish(SubscriptionChannels.TRANSACTION_FAILED, payload).catch(() => {});
+    }
+
+    // Generic updated broadcast
+    pubsub.publish(SubscriptionChannels.TRANSACTION_UPDATED, payload).catch(() => {});
+
+    // ── WebSocket broadcast (existing behaviour) ─────────────────────────
     const wsManager = WebSocketManager.getInstance();
     if (!wsManager) {
       return;
@@ -384,7 +467,7 @@ export class TransactionModel {
       await wsManager.broadcastTransactionUpdate({
         id,
         status,
-        userId: result.rows[0]?.user_id ?? null,
+        userId: row.user_id ?? null,
       });
     } catch (error) {
       console.error(
@@ -517,8 +600,8 @@ export class TransactionModel {
   }
 
   async updateNotes(id: string, notes: string): Promise<Transaction | null> {
-    if (notes.length > 1000) {
-      throw new Error("Notes cannot exceed 1000 characters");
+    if (notes.length > MAX_NOTES_LENGTH) {
+      throw new Error(`Notes cannot exceed ${MAX_NOTES_LENGTH} characters`);
     }
 
     const encryptedNotes = encrypt(notes);
