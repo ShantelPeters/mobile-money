@@ -2,7 +2,14 @@ import { pool, queryRead, queryWrite } from "../config/database";
 import { generateReferenceNumber } from "../utils/referenceGenerator";
 import { encrypt, decrypt } from "../utils/encryption";
 import { WebSocketManager } from "../websocket";
+import { getRedisPubSub } from "../graphql/redisPubSub";
+import {
+  SubscriptionChannels,
+  transactionChannel,
+  type TransactionUpdatedPayload,
+} from "../graphql/subscriptions";
 
+export type AssetType = 'native' | 'credit_alphanum4' | 'credit_alphanum12';
 export enum TransactionStatus {
   Pending = "pending",
   Completed = "completed",
@@ -84,7 +91,6 @@ export interface Transaction {
   convertedAmount?: string;
   phoneNumber: string;
   provider: string;
-providerReference?: string | null;
   stellarAddress: string;
   status: TransactionStatus;
   // NEW fields
@@ -195,6 +201,19 @@ export function mapTransactionRow(
         ? String(db.user_id ?? r.userId)
         : null,
     retryCount: Number(db.retry_count ?? r.retryCount ?? 0),
+    // Add missing required properties with defaults
+    assetType: (r.asset_type ?? r.assetType ?? 'native') as AssetType,
+    assetCode: r.asset_code ?? r.assetCode ?? undefined,
+    assetIssuer: r.asset_issuer ?? r.assetIssuer ?? undefined,
+    currency: r.currency ?? 'USD',
+    originalAmount: r.original_amount ?? r.originalAmount ?? r.amount,
+    convertedAmount: r.converted_amount ?? r.convertedAmount ?? undefined,
+    idempotencyKey: r.idempotency_key ?? r.idempotencyKey ?? undefined,
+    idempotencyExpiresAt: r.idempotency_expires_at ?? r.idempotencyExpiresAt ? new Date(String(r.idempotency_expires_at ?? r.idempotencyExpiresAt)) : undefined,
+    webhook_delivery_status: r.webhook_delivery_status ?? undefined,
+    webhook_last_attempt_at: r.webhook_last_attempt_at ? new Date(String(r.webhook_last_attempt_at)) : undefined,
+    webhook_delivered_at: r.webhook_delivered_at ? new Date(String(r.webhook_delivered_at)) : undefined,
+    webhook_last_error: r.webhook_last_error ?? undefined,
     createdAt:
       created instanceof Date ? created : new Date(String(created ?? "")),
     updatedAt:
@@ -395,12 +414,12 @@ export class TransactionModel {
   }
 
   async updateStatus(id: string, status: TransactionStatus): Promise<void> {
-    const result = await queryWrite<{ user_id: string | null }>(
+    const result = await queryWrite<{ user_id: string | null; reference_number: string; updated_at: Date }>(
       `UPDATE transactions
        SET status = $1,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $2
-       RETURNING user_id`,
+       RETURNING user_id, reference_number, updated_at`,
       [status, id],
     );
 
@@ -408,6 +427,37 @@ export class TransactionModel {
       return;
     }
 
+    const row = result.rows[0];
+
+    // ── Publish GraphQL subscription event ──────────────────────────────
+    // Publish to both the per-transaction channel (targeted) and the
+    // broadcast channel (for clients watching all transactions).
+    const pubsub = getRedisPubSub();
+    const now = row.updated_at?.toISOString() ?? new Date().toISOString();
+
+    const payload: TransactionUpdatedPayload = {
+      id,
+      referenceNumber: row.reference_number,
+      status,
+      updatedAt: now,
+    };
+
+    // Per-transaction channel — clients subscribed to transactionUpdated(id: $id)
+    pubsub.publish(transactionChannel(id), payload).catch((err) => {
+      console.error(`[pubsub] Failed to publish ${transactionChannel(id)}`, err);
+    });
+
+    // Broadcast channels for status-specific subscriptions
+    if (status === TransactionStatus.Completed) {
+      pubsub.publish(SubscriptionChannels.TRANSACTION_COMPLETED, payload).catch(() => {});
+    } else if (status === TransactionStatus.Failed) {
+      pubsub.publish(SubscriptionChannels.TRANSACTION_FAILED, payload).catch(() => {});
+    }
+
+    // Generic updated broadcast
+    pubsub.publish(SubscriptionChannels.TRANSACTION_UPDATED, payload).catch(() => {});
+
+    // ── WebSocket broadcast (existing behaviour) ─────────────────────────
     const wsManager = WebSocketManager.getInstance();
     if (!wsManager) {
       return;
@@ -417,7 +467,7 @@ export class TransactionModel {
       await wsManager.broadcastTransactionUpdate({
         id,
         status,
-        userId: result.rows[0]?.user_id ?? null,
+        userId: row.user_id ?? null,
       });
     } catch (error) {
       console.error(
@@ -807,4 +857,19 @@ export class TransactionModel {
       .map((r) => mapTransactionRow(r))
       .filter((t): t is Transaction => t !== null);
   }
-}
+
+  async getBalanceStatistics(userId: string): Promise<{ total_deposited: string; total_withdrawn: string; current_balance: string }> {
+    const result = await queryRead(
+      `SELECT 
+         COALESCE(SUM(amount) FILTER (WHERE type = 'deposit'), 0)::text as total_deposited,
+         COALESCE(SUM(amount) FILTER (WHERE type = 'withdraw'), 0)::text as total_withdrawn,
+         (COALESCE(SUM(amount) FILTER (WHERE type = 'deposit'), 0) - 
+          COALESCE(SUM(amount) FILTER (WHERE type = 'withdraw'), 0))::text as current_balance
+       FROM transactions
+       WHERE user_id = $1 AND status = 'completed'`,
+      [userId]
+    );
+
+    return result.rows[0];
+  }
+}

@@ -149,6 +149,7 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
   const retryConfig = {
     maxAttempts,
     baseDelayMs,
+    provider,
     onRetry: async ({
       attempt,
       error,
@@ -170,6 +171,14 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
   ) => {
     try {
       const txRow = await transactionModel.findById(transactionId);
+      if (!txRow?.userId) return;
+
+      const user = await userModel.findById(txRow.userId);
+      if (user?.smsOptOut) {
+        console.log(`[${transactionId}] SMS notifications skipped (User Opted Out)`);
+        return;
+      }
+
       const ref = txRow?.referenceNumber ?? transactionId;
       await smsService.notifyTransactionEvent(phoneNumber, {
         referenceNumber: ref,
@@ -203,7 +212,7 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
           await transactionModel.updateMetadata(transactionId, updatedMetadata);
         }
 
-        await job.updateProgress(90);
+        await updateProgress(transactionId, 90);
   try {
     await updateProgress(transactionId, 10);
 

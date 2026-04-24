@@ -43,6 +43,11 @@ export {
   pauseQueueEndpoint,
   resumeQueueEndpoint,
 } from "./health";
+export {
+  getQueueDepth,
+  queueDepthHandler,
+  queueDepthPrometheusHandler,
+} from "./queueDepthMetrics";
 
 export { queueOptions } from "./config";
 export { deadLetterQueue, DLQ_NAME, capturePersistentFailure } from "./dlq";

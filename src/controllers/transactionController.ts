@@ -2,6 +2,8 @@ import { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
+import { maskPhoneNumber } from "../utils/masking";
+import { validatePhoneProviderMatch } from "../utils/phoneUtils";
 import {
   Transaction,
   TransactionModel,
@@ -446,7 +448,7 @@ async function processTransactionRequest(
               idempotencyExpiresAt: idempotencyKey
                 ? buildIdempotencyExpiry()
                 : null,
-              locationMetadata: req.geoLocation ?? null,
+              locationMetadata: (req as any).geoLocation ?? null,
             });
             void monitorTransactionForAML(transaction);
             void applyTravelRule(transaction);

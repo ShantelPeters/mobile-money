@@ -1,15 +1,21 @@
+import path from "path";
+// Serve SEP-1 stellar.toml at /.well-known/stellar.toml
+app.use("/.well-known", express.static(path.join(__dirname, "../public/.well-known")));
 import "./tracer";
+
 import express, { NextFunction, Request, Response } from "express";
 import { IncomingMessage, Server } from "http";
 // replaced express-rate-limit with our redis-backed middleware
 import compression from "compression";
 import dotenv from "dotenv";
-import spdy from 'spdy';
+import spdy from "spdy";
 import https from "https";
 import fs from "fs";
 import path from "path";
 import session from "express-session";
 import * as Sentry from "@sentry/node";
+import { register } from "prom-client";
+import { startStellarExporter } from "./services/stellarExporter";
 
 import {
   apiVersionMiddleware,
@@ -34,9 +40,11 @@ import { reportsRoutes } from "./routes/reports";
 import { statementsRoutes } from "./routes/statements";
 import feesRoutes from "./routes/fees";
 import stellarRoutes from "./routes/stellar";
+import htlcRoutes from "./routes/htlc";
 import { createKYCRoutes } from "./routes/kycRoutes";
 import { vaultRoutes } from "./routes/vaults";
 import { adminRoutes } from "./routes/admin";
+import kycTierUpgradeRoutes from "./routes/kycTierUpgradeRoutes";
 import { makerCheckerRoutes } from "./routes/makerChecker";
 import { userRoutes } from "./routes/users";
 import { auditRoutes } from "./routes/audit";
@@ -65,6 +73,7 @@ import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import { privacyRoutes } from "./routes/privacy";
+import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
@@ -72,11 +81,14 @@ import sep38Router from "./stellar/sep38";
 import { createSep12Router } from "./stellar/sep12";
 import { createSep10Router } from "./stellar/sep10";
 import tomlRouter from "./routes/toml";
-import { startJobs } from "./jobs/scheduler";
+import feesRouter from "./routes/fees";
+import feeStrategiesRouter from "./routes/feeStrategies";
+import crossChainRouter from "./routes/crossChain";
 
 // 1. Import Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
 import { WebSocketManager } from "./websocket";
+import { layeredCache } from "./services/layeredCache";
 
 dotenv.config();
 
@@ -149,7 +161,7 @@ app.use(
     extended: true,
   }),
 );
-// app.use(rateLimitMiddleware); 
+// app.use(rateLimitMiddleware);
 app.use(responseTime);
 app.use(requestId);
 app.use(i18nMiddleware);
@@ -248,22 +260,23 @@ app.get("/ready", async (_req: Request, res: Response) => {
   res.status(allReady ? 200 : 503).json(body);
 });
 
-
 // Load Balancer Health Check
-let lbHealthCache: { data: any, timestamp: number } | null = null;
+let lbHealthCache: { data: any; timestamp: number } | null = null;
 const LB_HEALTH_CACHE_TTL = 5000;
 
 app.get("/health/lb", async (req: Request, res: Response) => {
   const now = Date.now();
-  if (lbHealthCache && (now - lbHealthCache.timestamp < LB_HEALTH_CACHE_TTL)) {
-    res.status(lbHealthCache.data.status === "ok" ? 200 : 503).json(lbHealthCache.data);
+  if (lbHealthCache && now - lbHealthCache.timestamp < LB_HEALTH_CACHE_TTL) {
+    res
+      .status(lbHealthCache.data.status === "ok" ? 200 : 503)
+      .json(lbHealthCache.data);
     return;
   }
 
   const checks: Record<string, string> = {
     database: "down",
     redis: "down",
-    memory: "ok"
+    memory: "ok",
   };
   let healthy = true;
 
@@ -291,7 +304,8 @@ app.get("/health/lb", async (req: Request, res: Response) => {
   }
 
   const memUsage = process.memoryUsage();
-  if (memUsage.heapUsed > 1024 * 1024 * 1024) { // 1GB limit
+  if (memUsage.heapUsed > 1024 * 1024 * 1024) {
+    // 1GB limit
     checks.memory = "high";
     healthy = false;
   }
@@ -299,7 +313,7 @@ app.get("/health/lb", async (req: Request, res: Response) => {
   const responseData = {
     status: healthy ? "ok" : "error",
     checks,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   };
 
   lbHealthCache = { data: responseData, timestamp: now };
@@ -348,19 +362,32 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
-app.use("/api/audit", auditRoutes);
-
-app.use("/api/stellar", stellarRoutes);
+app.use("/api/fees", feesRouter);
+app.use("/api/fee-strategies", feeStrategiesRouter);
+app.use("/api/cross-chain", crossChainRouter);
 
 // GDPR
 app.use("/api/gdpr", privacyRoutes);
+app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
+app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
+app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
 app.use("/sep38", sep38Router);
 app.use("/sep12", createSep12Router(pool));
 app.use("/.well-known/stellar.toml", tomlRouter);
+
+// Prometheus Metrics Scraper Endpoint
+app.get("/metrics", async (req: Request, res: Response) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (ex) {
+    res.status(500).end(String(ex));
+  }
+});
 
 app.use(
   (
@@ -415,7 +442,9 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
 
   try {
     if (server) {
-      console.log("[Shutdown] Stopping HTTP server from accepting new requests");
+      console.log(
+        "[Shutdown] Stopping HTTP server from accepting new requests",
+      );
       await new Promise<void>((resolve, reject) => {
         server?.close((error) => {
           if (error) {
@@ -485,16 +514,26 @@ async function initializeRuntime(): Promise<void> {
   const { startJobs } = await import("./jobs/scheduler");
   startJobs();
 
+  // Initialize Prometheus Horizon Scraper
+  startStellarExporter();
+
   const { getQueueHealth, pauseQueueEndpoint, resumeQueueEndpoint } =
     await import("./queue/health");
+  const { queueDepthHandler, queueDepthPrometheusHandler } =
+    await import("./queue/queueDepthMetrics");
 
   app.get("/health/queue", getQueueHealth);
+  app.get("/health/queue/depth", queueDepthHandler);
+  app.get("/metrics/queue_depth", queueDepthPrometheusHandler);
   app.post("/admin/queues/pause", pauseQueueEndpoint);
   app.post("/admin/queues/resume", resumeQueueEndpoint);
 
   try {
     await connectRedis();
     console.log("Redis initialized");
+
+    await layeredCache.init();
+    console.log("Layered cache (L1/L2) initialized");
 
     const { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob } =
       await import("./queue");
@@ -533,6 +572,10 @@ async function initializeRuntime(): Promise<void> {
 
     wsManager = new WebSocketManager(server);
     console.log("WebSocket server attached");
+
+    // Start Apollo Server with APQ enabled (must run after HTTP server is created)
+    await startApolloServer(app, server);
+    console.log("Apollo GraphQL server started at /graphql");
   }
 }
 

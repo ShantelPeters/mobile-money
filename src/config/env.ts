@@ -31,7 +31,11 @@ export const env = cleanEnv(process.env, {
   }),
   DB_ENCRYPTION_KEY: str({
     default: "development-encryption-key-32-chars-long",
-    desc: "Secret key for PII encryption in database",
+    desc: "Secret key for PII encryption in database (AES-256-GCM global key material)",
+  }),
+  PII_MASTER_KEY: str({
+    default: "development-pii-master-key-32-chars!",
+    desc: "Master key for per-user HKDF key derivation. Must be a high-entropy secret in production. Never log or expose this value.",
   }),
   REFRESH_TOKEN_EXPIRES_IN: str({
     default: process.env.REFRESH_TOKEN_EXPIRES_IN,
@@ -58,9 +62,9 @@ export const env = cleanEnv(process.env, {
     default: "mobile-money",
     desc: "PagerDuty deduplication key prefix for incident grouping",
   }),
-  ADMIN_API_KEY: str({
-    desc: "Administrative API key for system operations",
-    example: "your-secure-admin-api-key-here",
+  APQ_TTL_SECONDS: str({
+    default: "86400",
+    desc: "TTL in seconds for Automatic Persisted Query entries in Redis (default: 86400 = 24h)",
   }),
 });
 
@@ -72,6 +76,7 @@ export const {
   STELLAR_HORIZON_URL,
   STELLAR_NETWORK,
   DB_ENCRYPTION_KEY,
+  PII_MASTER_KEY,
   PAGERDUTY_INTEGRATION_KEY,
   PAGERDUTY_DEDUP_KEY,
   ADMIN_API_KEY,

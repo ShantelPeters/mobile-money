@@ -130,7 +130,7 @@ async function updateSep31Status(
       transactionStatus = TransactionStatus.Failed;
       break;
     default:
-      transactionStatus = TransactionStatus.Processing;
+      transactionStatus = TransactionStatus.Pending;
   }
 
   await transactionModel.updateStatus(transactionId, transactionStatus);

@@ -10,6 +10,7 @@ import type { GraphQLContext } from "./context";
 import { mapTransactionRow, type MappedTransaction } from "./transactionMapper";
 import { TransactionStatus } from "../models/transaction";
 import { createSubscriptionResolvers } from "./subscriptionResolvers";
+import { getRedisPubSub } from "./redisPubSub";
 import {
   SubscriptionChannels,
   type TransactionCreatedPayload,
@@ -560,16 +561,7 @@ export const resolvers = {
   },
 };
 
-// Create subscription resolvers with shared pubsub
-let subscriptionPubSub: any;
-function getSubscriptionPubSub() {
-  if (!subscriptionPubSub) {
-    const { PubSub } = require("graphql-subscriptions");
-    subscriptionPubSub = new PubSub();
-  }
-  return subscriptionPubSub;
-}
-
+// Subscription resolvers backed by the Redis pubsub singleton
 export const subscriptionResolvers = createSubscriptionResolvers(
-  getSubscriptionPubSub(),
+  getRedisPubSub(),
 );

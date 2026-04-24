@@ -61,9 +61,10 @@ export async function evaluateAdminLoginAnomaly(
     };
   }
 
-  const previousIp = await redisClient.get(ADMIN_LOGIN_IP_KEY(user.id));
+  const previousIpRaw = await redisClient.get(ADMIN_LOGIN_IP_KEY(user.id));
   const previousAtValue = await redisClient.get(ADMIN_LOGIN_AT_KEY(user.id));
   const currentCountry = getIpLocation(currentIp);
+  const previousIp = previousIpRaw ? String(previousIpRaw) : null;
   const previousCountry = previousIp ? getIpLocation(previousIp) : null;
   const lastLoginTs = previousAtValue ? Number(previousAtValue) : null;
   const timeSinceLastLoginMs = lastLoginTs ? Date.now() - lastLoginTs : null;

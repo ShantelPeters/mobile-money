@@ -12,6 +12,9 @@ import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
+import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
+import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
+import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 
 interface JobConfig {
   name: string;

@@ -37,6 +37,7 @@ export function loadSSOConfig(): SSOEnvironmentConfig {
       enabled: false,
       providers: [],
       enforceSSOForEmployees: false,
+      oidc: {},
     };
   }
 

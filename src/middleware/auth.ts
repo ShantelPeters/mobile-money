@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { verifyOAuthAccessToken } from "../auth/oauth";
 import { verifyToken, JWTPayload } from "../auth/jwt";
 import { ADMIN_API_KEY } from "../config/env";
+import { redisClient } from "../config/redis";
 
 type RequestUser = {
   id: string;
@@ -209,7 +210,8 @@ export async function verifyTokenStateful(token: string): Promise<JWTPayload> {
   
   // Fast Redis check to ensure token wasn't issued before a password change
   if (redisClient.isOpen && decoded.userId && decoded.iat) {
-    const invalidatedAt = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
+    const invalidatedAtRaw = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
+    const invalidatedAt = invalidatedAtRaw ? String(invalidatedAtRaw) : null;
     if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
       throw new Error("Token has been revoked due to password change");
     }

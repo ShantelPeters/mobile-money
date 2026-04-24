@@ -297,10 +297,10 @@ export async function flushUserSessions(userId: string): Promise<void> {
     await redisClient.set(`user:${userId}:jwt_invalidated_at`, now.toString());
 
     // 2. Scan and destroy all express-sessions tied to this user
-    let cursor = 0;
+    let cursor = "0";
     do {
       const reply = await redisClient.scan(cursor, { MATCH: "session:*", COUNT: 100 });
-      cursor = reply.cursor;
+      cursor = String(reply.cursor);
       
       for (const key of reply.keys) {
         const sessionData = await redisClient.get(key);
@@ -309,7 +309,7 @@ export async function flushUserSessions(userId: string): Promise<void> {
           await redisClient.del(key);
         }
       }
-    } while (cursor !== 0);
+    } while (cursor !== "0");
   } catch (error) {
     console.error(`Redis: Failed to flush sessions for user ${userId}`, error);
   }
