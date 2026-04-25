@@ -53,6 +53,7 @@ import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import sep31Router from "./stellar/sep31";
+import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
 
 dotenv.config();
 
