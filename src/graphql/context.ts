@@ -5,9 +5,13 @@ import { DisputeService } from "../services/dispute";
 import { lockManager, LockKeys } from "../utils/lock";
 import { addTransactionJob, getJobProgress } from "../queue";
 import { getBulkImportJob } from "../routes/bulk";
+import type { TypedPubSub } from "./subscriptions";
+import { getRedisPubSub } from "./redisPubSub";
 
 const transactionModel = new TransactionModel();
 const disputeService = new DisputeService();
+// Use Redis-backed pubsub so events fan out across all server instances
+const pubsub = getRedisPubSub();
 
 export interface GraphQLAuth {
   authenticated: boolean;
@@ -23,6 +27,7 @@ export interface GraphQLContext {
   addTransactionJob: typeof addTransactionJob;
   getJobProgress: typeof getJobProgress;
   getBulkImportJob: typeof getBulkImportJob;
+  pubsub: TypedPubSub;
 }
 
 function resolveAuth(req: Request): GraphQLAuth {
@@ -65,5 +70,6 @@ export function buildGraphqlContext(req: Request): GraphQLContext {
     addTransactionJob,
     getJobProgress,
     getBulkImportJob,
+    pubsub,
   };
 }

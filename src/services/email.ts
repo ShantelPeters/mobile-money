@@ -1,25 +1,33 @@
-import nodemailer from "nodemailer";
+import sgMail from "@sendgrid/mail";
 import { Transaction } from "../models/transaction";
+import { DailySnapshot } from "../models/snapshot";
+import { GrowthMetrics } from "./snapshotService";
+import { resolveLocale, translate } from "../utils/i18n";
+
+export interface LockoutEmailOptions {
+  minutesRemaining: number;
+  unlocksAt: Date;
+  ipAddress?: string;
+  locale?: string;
+}
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY || "");
 
 export interface EmailOptions {
   to: string;
-  subject: string;
-  html: string;
-  text: string;
+  templateId: string;
+  dynamicTemplateData: Record<string, any>;
 }
 
 export class EmailService {
-  private transporter: nodemailer.Transporter;
+  private resolveTemplateId(
+    baseEnvName: "SENDGRID_RECEIPT_TEMPLATE_ID" | "SENDGRID_FAILURE_TEMPLATE_ID",
+    locale: string,
+  ): string {
+    const resolvedLocale = resolveLocale(locale).toUpperCase();
+    const localizedEnvKey = `${baseEnvName}_${resolvedLocale}`;
 
-  constructor() {
-    this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || "smtp.ethereal.email",
-      port: parseInt(process.env.SMTP_PORT || "587"),
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
+    return process.env[localizedEnvKey] || process.env[baseEnvName] || "";
   }
 
   async sendEmail(options: EmailOptions): Promise<void> {
@@ -29,9 +37,9 @@ export class EmailService {
     }
 
     try {
-      await this.transporter.sendMail({
+      await sgMail.send({
         from: process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>',
-        ...options,
+        ...options
       });
     } catch (error) {
       console.error("Email delivery failed:", error);
@@ -40,94 +48,194 @@ export class EmailService {
     }
   }
 
-  async sendTransactionReceipt(email: string, transaction: Transaction): Promise<void> {
-    const subject = `Transaction Receipt - ${transaction.referenceNumber}`;
-    const html = this.getReceiptHtml(transaction);
-    const text = `Your transaction of ${transaction.amount} ${transaction.type === 'deposit' ? 'to' : 'from'} ${transaction.stellarAddress} was successful. Reference: ${transaction.referenceNumber}`;
-
-    await this.sendEmail({ to: email, subject, html, text });
+  async sendTransactionReceipt(
+    email: string,
+    transaction: Transaction,
+    locale = "en",
+  ): Promise<void> {
+    const resolvedLocale = resolveLocale(locale);
+    await this.sendEmail({
+      to: email,
+      templateId: this.resolveTemplateId(
+        "SENDGRID_RECEIPT_TEMPLATE_ID",
+        resolvedLocale,
+      ),
+      dynamicTemplateData: {
+        amount: transaction.amount,
+        type: transaction.type,
+        typeLocalized: translate(
+          `email.transaction_type.${transaction.type}`,
+          resolvedLocale,
+        ),
+        referenceNumber: transaction.referenceNumber,
+        provider: transaction.provider.toUpperCase(),
+        phoneNumber: transaction.phoneNumber,
+        stellarAddress: transaction.stellarAddress,
+        createdAt: new Date(transaction.createdAt).toLocaleString(resolvedLocale),
+        locale: resolvedLocale,
+        year: new Date().getFullYear(),
+      },
+    });
   }
 
-  async sendTransactionFailure(email: string, transaction: Transaction, reason: string): Promise<void> {
-    const subject = `Transaction Failed - ${transaction.referenceNumber}`;
-    const html = this.getFailureHtml(transaction, reason);
-    const text = `Your transaction of ${transaction.amount} failed. Reason: ${reason}. Reference: ${transaction.referenceNumber}`;
+  async sendAccountLockoutNotification(
+    email: string,
+    options: LockoutEmailOptions,
+  ): Promise<void> {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping lockout email in test environment");
+      return;
+    }
 
-    await this.sendEmail({ to: email, subject, html, text });
+    const { minutesRemaining, unlocksAt, ipAddress, locale = "en" } = options;
+    const resolvedLocale = resolveLocale(locale);
+
+    const templateId = process.env.SENDGRID_LOCKOUT_TEMPLATE_ID;
+    const from =
+      process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>';
+
+    try {
+      if (templateId) {
+        await sgMail.send({
+          from,
+          to: email,
+          templateId,
+          dynamicTemplateData: {
+            minutesRemaining,
+            unlocksAt: unlocksAt.toISOString(),
+            unlocksAtLocalized: unlocksAt.toLocaleString(resolvedLocale),
+            ipAddress: ipAddress ?? "unknown",
+            locale: resolvedLocale,
+            year: new Date().getFullYear(),
+          },
+        });
+      } else {
+        // Inline HTML fallback — no template required in SendGrid.
+        const unlockTime = unlocksAt.toLocaleString(resolvedLocale);
+        const ipNote = ipAddress
+          ? `<p style="color:#666;font-size:13px;">Request originated from IP: ${ipAddress}</p>`
+          : "";
+
+        await sgMail.send({
+          from,
+          to: email,
+          subject: "Your account has been temporarily locked",
+          html: `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+              <h2 style="color:#c0392b">Account Temporarily Locked</h2>
+              <p>We detected multiple failed login attempts on your Mobile Money account.</p>
+              <p>For your security, your account has been <strong>temporarily locked for ${minutesRemaining} minute${minutesRemaining === 1 ? "" : "s"}</strong>.</p>
+              <p>You will be able to log in again after:<br>
+                <strong>${unlockTime}</strong>
+              </p>
+              ${ipNote}
+              <p>If this wasn't you, please contact our support team immediately.</p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+              <p style="color:#999;font-size:12px">
+                &copy; ${new Date().getFullYear()} Mobile Money. This is an automated security notification.
+              </p>
+            </div>
+          `,
+          text:
+            `Your Mobile Money account has been temporarily locked due to multiple failed login attempts.\n\n` +
+            `You can try again in ${minutesRemaining} minute${minutesRemaining === 1 ? "" : "s"} (after ${unlockTime}).\n\n` +
+            `If this wasn't you, please contact support immediately.`,
+        });
+      }
+    } catch (error) {
+      console.error("[Email] Lockout notification delivery failed:", error);
+    }
   }
 
-  private getReceiptHtml(transaction: Transaction): string {
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: #4a90e2; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
-          .content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; }
-          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #888; }
-          .details { margin: 20px 0; background: #f9f9f9; padding: 15px; border-radius: 4px; }
-          .amount { font-size: 24px; font-weight: bold; color: #2ecc71; text-align: center; margin: 10px 0; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>Transaction Successful</h1>
-        </div>
-        <div class="content">
-          <p>Hello,</p>
-          <p>Your ${transaction.type} has been processed successfully.</p>
-          <div class="details">
-            <div class="amount">${transaction.amount} XAF</div>
-            <p><strong>Reference:</strong> ${transaction.referenceNumber}</p>
-            <p><strong>Provider:</strong> ${transaction.provider.toUpperCase()}</p>
-            <p><strong>Phone:</strong> ${transaction.phoneNumber}</p>
-            <p><strong>Wallet:</strong> ${transaction.stellarAddress}</p>
-            <p><strong>Date:</strong> ${new Date(transaction.createdAt).toLocaleString()}</p>
+  async sendTransactionFailure(
+    email: string,
+    transaction: Transaction,
+    reason: string,
+    locale = "en",
+  ): Promise<void> {
+    const resolvedLocale = resolveLocale(locale);
+    await this.sendEmail({
+      to: email,
+      templateId: this.resolveTemplateId(
+        "SENDGRID_FAILURE_TEMPLATE_ID",
+        resolvedLocale,
+      ),
+      dynamicTemplateData: {
+        amount: transaction.amount,
+        type: transaction.type,
+        typeLocalized: translate(
+          `email.transaction_type.${transaction.type}`,
+          resolvedLocale,
+        ),
+        referenceNumber: transaction.referenceNumber,
+        reason,
+        reasonLabel: translate("email.labels.reason", resolvedLocale),
+        locale: resolvedLocale,
+        year: new Date().getFullYear(),
+      },
+    });
+  }
+
+  async sendManagementSummary(
+    email: string,
+    snapshot: DailySnapshot,
+    growth: GrowthMetrics,
+  ): Promise<void> {
+    const templateId = process.env.SENDGRID_MANAGEMENT_SUMMARY_TEMPLATE_ID;
+    const from = process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>';
+
+    if (templateId) {
+      await this.sendEmail({
+        to: email,
+        templateId,
+        dynamicTemplateData: {
+          snapshotDate: snapshot.snapshotDate,
+          totalBalance: snapshot.totalBalance,
+          totalMainBalance: snapshot.totalMainBalance,
+          totalVaultBalance: snapshot.totalVaultBalance,
+          dailyVolume: snapshot.dailyVolume,
+          transactionCount: snapshot.transactionCount,
+          volumeGrowth: growth.volumeGrowth.toFixed(2),
+          balanceGrowth: growth.balanceGrowth.toFixed(2),
+          year: new Date().getFullYear(),
+        },
+      });
+    } else {
+      // Fallback HTML
+      await sgMail.send({
+        from,
+        to: email,
+        subject: `Daily Financial Summary - ${snapshot.snapshotDate}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;border:1px solid #eee;padding:20px;">
+            <h2 style="color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px;">Daily Financial Summary</h2>
+            <p><strong>Date:</strong> ${snapshot.snapshotDate}</p>
+            
+            <div style="background:#f9f9f9;padding:15px;border-radius:5px;margin:20px 0;">
+              <h3 style="margin-top:0;color:#2980b9;">Balances</h3>
+              <table style="width:100%;">
+                <tr><td>Total Balance:</td><td style="text-align:right;"><strong>${snapshot.totalBalance}</strong></td></tr>
+                <tr><td style="padding-left:15px;color:#666;">- Main Balance:</td><td style="text-align:right;color:#666;">${snapshot.totalMainBalance}</td></tr>
+                <tr><td style="padding-left:15px;color:#666;">- Vault Balance:</td><td style="text-align:right;color:#666;">${snapshot.totalVaultBalance}</td></tr>
+                <tr><td>Balance Growth (DoD):</td><td style="text-align:right;color:${growth.balanceGrowth >= 0 ? "#27ae60" : "#c0392b"};">${growth.balanceGrowth.toFixed(2)}%</td></tr>
+              </table>
+            </div>
+
+            <div style="background:#f9f9f9;padding:15px;border-radius:5px;margin:20px 0;">
+              <h3 style="margin-top:0;color:#2980b9;">Volume</h3>
+              <table style="width:100%;">
+                <tr><td>Daily Volume:</td><td style="text-align:right;"><strong>${snapshot.dailyVolume}</strong></td></tr>
+                <tr><td>Transaction Count:</td><td style="text-align:right;">${snapshot.transactionCount}</td></tr>
+                <tr><td>Volume Growth (DoD):</td><td style="text-align:right;color:${growth.volumeGrowth >= 0 ? "#27ae60" : "#c0392b"};">${growth.volumeGrowth.toFixed(2)}%</td></tr>
+              </table>
+            </div>
+
+            <p style="color:#999;font-size:12px;margin-top:30px;text-align:center;">
+              &copy; ${new Date().getFullYear()} Mobile Money. This is an automated management report.
+            </p>
           </div>
-          <p>Thank you for using Mobile Money!</p>
-        </div>
-        <div class="footer">
-          &copy; ${new Date().getFullYear()} Mobile Money Inc. All rights reserved.
-        </div>
-      </body>
-      </html>
-    `;
-  }
-
-  private getFailureHtml(transaction: Transaction, reason: string): string {
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background: #e74c3c; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
-          .content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; }
-          .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #888; }
-          .error-box { background: #fdf2f2; border: 1px solid #fbd5d5; color: #9b1c1c; padding: 15px; border-radius: 4px; margin: 20px 0; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>Transaction Failed</h1>
-        </div>
-        <div class="content">
-          <p>Hello,</p>
-          <p>Unfortunately, your ${transaction.type} could not be completed at this time.</p>
-          <div class="error-box">
-            <strong>Reason:</strong> ${reason}
-          </div>
-          <p><strong>Reference:</strong> ${transaction.referenceNumber}</p>
-          <p>If you have any questions, please contact our support team.</p>
-        </div>
-        <div class="footer">
-          &copy; ${new Date().getFullYear()} Mobile Money Inc. All rights reserved.
-        </div>
-      </body>
-      </html>
-    `;
+        `,
+      });
+    }
   }
 }

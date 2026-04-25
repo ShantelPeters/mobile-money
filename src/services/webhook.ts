@@ -17,6 +17,48 @@ export interface WebhookPayload {
   data: Record<string, string>;
 }
 
+export type WebhookOutboxStatus = "pending" | "processing" | "delivered" | "failed";
+
+export interface WebhookOutboxEntry {
+  id: string;
+  eventType: string;
+  payload: WebhookPayload | FlatWebhookPayload;
+  status: WebhookOutboxStatus;
+  attempts: number;
+  maxAttempts: number;
+  lastAttemptAt?: Date;
+  nextAttemptAt?: Date;
+  errorMessage?: string;
+  createdAt: Date;
+}
+
+/**
+ * Flat webhook payload optimized for Zapier/Make.com
+ */
+export interface FlatWebhookPayload {
+  event_id: string;
+  event_type: WebhookEvent;
+  timestamp: string;
+  transaction_id: string;
+  reference_number: string;
+  transaction_type: "deposit" | "withdraw";
+  amount: string;
+  currency: string;
+  phone_number: string;
+  provider: string;
+  stellar_address: string;
+  status: "pending" | "completed" | "failed" | "cancelled";
+  user_id?: string;
+  notes?: string;
+  tags?: string;
+  created_at: string;
+  updated_at?: string;
+  metadata_key?: string;
+  metadata_value?: string;
+  webhook_delivery_status?: string;
+  webhook_delivered_at?: string;
+}
+
 export interface WebhookDeliveryResult {
   status: Exclude<WebhookDeliveryStatus, "pending">;
   attempts: number;
@@ -49,6 +91,13 @@ interface WebhookTransactionModel {
     id: string,
     delivery: WebhookDeliveryUpdate,
   ): Promise<void>;
+}
+
+export interface WebhookOutboxModel {
+  insert(entry: Omit<WebhookOutboxEntry, "id" | "createdAt">): Promise<string>;
+  findNextToProcess(limit: number): Promise<WebhookOutboxEntry[]>;
+  update(id: string, update: Partial<WebhookOutboxEntry>): Promise<void>;
+  delete(id: string): Promise<void>;
 }
 
 function wait(ms: number): Promise<void> {
@@ -123,6 +172,47 @@ export class WebhookService {
       timestamp: this.now().toISOString(),
       data: toWebhookData(transaction),
     };
+  }
+
+  buildFlatPayload(event: WebhookEvent, transaction: Transaction): FlatWebhookPayload {
+    const eventId = `evt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    const payload: FlatWebhookPayload = {
+      event_id: eventId,
+      event_type: event,
+      timestamp: this.now().toISOString(),
+
+      transaction_id: transaction.id,
+      reference_number: transaction.referenceNumber,
+      transaction_type: transaction.type,
+      amount: transaction.amount,
+      currency: (transaction as any).currency || "USD",
+      phone_number: transaction.phoneNumber,
+      provider: transaction.provider,
+      stellar_address: transaction.stellarAddress,
+      status: transaction.status,
+
+      user_id: transaction.userId || undefined,
+      notes: transaction.notes || undefined,
+      tags: transaction.tags ? transaction.tags.join(",") : undefined,
+
+      created_at: transaction.createdAt.toISOString(),
+      updated_at: transaction.updatedAt ? transaction.updatedAt.toISOString() : undefined,
+
+      webhook_delivery_status: (transaction as any).webhook_delivery_status,
+      webhook_delivered_at: (transaction as any).webhook_delivered_at ? (transaction as any).webhook_delivered_at.toISOString() : undefined
+    };
+
+    // Flatten first metadata key-value pair for easy access
+    if (transaction.metadata && typeof transaction.metadata === "object") {
+      const entries = Object.entries(transaction.metadata);
+      if (entries.length > 0) {
+        payload.metadata_key = entries[0][0];
+        payload.metadata_value = String(entries[0][1]);
+      }
+    }
+
+    return payload;
   }
 
   signPayload(rawPayload: string): string {
@@ -224,6 +314,177 @@ export class WebhookService {
       lastError,
     };
   }
+
+  async sendFlatTransactionEvent(
+    event: WebhookEvent,
+    transaction: Transaction,
+  ): Promise<WebhookDeliveryResult> {
+    if (!this.webhookUrl) {
+      const message = "WEBHOOK_URL is not configured";
+      this.logger.warn(`[webhook] ${message}`);
+      return {
+        status: "skipped",
+        attempts: 0,
+        lastAttemptAt: null,
+        deliveredAt: null,
+        lastError: message,
+      };
+    }
+
+    if (!this.webhookSecret) {
+      const message = "WEBHOOK_SECRET is not configured";
+      this.logger.warn(`[webhook] ${message}`);
+      return {
+        status: "skipped",
+        attempts: 0,
+        lastAttemptAt: null,
+        deliveredAt: null,
+        lastError: message,
+      };
+    }
+
+    const payload = this.buildFlatPayload(event, transaction);
+    const rawPayload = JSON.stringify(payload);
+    const signature = this.signPayload(rawPayload);
+    let lastError: string | null = null;
+    let lastStatusCode: number | undefined;
+    let lastAttemptAt: Date | null = null;
+
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      lastAttemptAt = this.now();
+
+      try {
+        const response = await this.fetchImpl(this.webhookUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Signature": signature,
+          },
+          body: rawPayload,
+        });
+
+        lastStatusCode = response.status;
+
+        if (!response.ok) {
+          throw new Error(`Webhook responded with HTTP ${response.status}`);
+        }
+
+        this.logger.log(
+          `[webhook] delivered flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt}`,
+        );
+
+        return {
+          status: "delivered",
+          attempts: attempt,
+          statusCode: response.status,
+          lastAttemptAt,
+          deliveredAt: lastAttemptAt,
+          lastError: null,
+        };
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error.message : "Unknown webhook error";
+
+        this.logger.warn(
+          `[webhook] delivery failed flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt}/${this.maxAttempts}: ${lastError}`,
+        );
+
+        if (attempt < this.maxAttempts) {
+          await this.sleepImpl(this.baseDelayMs * 2 ** (attempt - 1));
+        }
+      }
+    }
+
+    this.logger.error(
+      `[webhook] delivery exhausted flat event=${event} transactionId=${payload.transaction_id}: ${lastError}`,
+    );
+
+    return {
+      status: "failed",
+      attempts: this.maxAttempts,
+      statusCode: lastStatusCode,
+      lastAttemptAt,
+      deliveredAt: null,
+      lastError,
+    };
+  }
+
+  /**
+   * Process a batch of entries from the webhook outbox.
+   * Implementing the worker part of the Outbox Pattern.
+   */
+  async processOutbox(
+    outboxModel: WebhookOutboxModel,
+    batchSize: number = 10,
+  ): Promise<{ processed: number; failures: number }> {
+    const entries = await outboxModel.findNextToProcess(batchSize);
+    let processed = 0;
+    let failures = 0;
+
+    for (const entry of entries) {
+      const rawPayload = JSON.stringify(entry.payload);
+      const signature = this.signPayload(rawPayload);
+      const now = this.now();
+
+      try {
+        const response = await this.fetchImpl(this.webhookUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Signature": signature,
+          },
+          body: rawPayload,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        this.logger.log(`[webhook-outbox] Delivered entry=${entry.id}`);
+
+        // Successfully delivered
+        await outboxModel.update(entry.id, {
+          status: "delivered",
+          attempts: entry.attempts + 1,
+          lastAttemptAt: now,
+          errorMessage: undefined,
+        });
+
+        processed++;
+      } catch (error) {
+        failures++;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const attempts = entry.attempts + 1;
+
+        if (attempts >= entry.maxAttempts) {
+          await outboxModel.update(entry.id, {
+            status: "failed",
+            attempts,
+            lastAttemptAt: now,
+            errorMessage: `Exhausted retries: ${errorMessage}`,
+          });
+        } else {
+          // Exponential backoff for retries
+          const backoffMs = this.baseDelayMs * Math.pow(2, attempts - 1);
+          const nextAttemptAt = new Date(now.getTime() + backoffMs);
+
+          await outboxModel.update(entry.id, {
+            status: "pending", // Reset to pending for next retry
+            attempts,
+            lastAttemptAt: now,
+            nextAttemptAt,
+            errorMessage,
+          });
+        }
+
+        this.logger.warn(
+          `[webhook-outbox] Failed to deliver entry=${entry.id} attempt=${attempts}/${entry.maxAttempts}: ${errorMessage}`,
+        );
+      }
+    }
+
+    return { processed, failures };
+  }
 }
 
 export async function notifyTransactionWebhook(
@@ -248,6 +509,76 @@ export async function notifyTransactionWebhook(
   }
 
   const result = await webhookService.sendTransactionEvent(event, transaction);
+
+  await dependencies.transactionModel.updateWebhookDelivery(transactionId, {
+    status: result.status,
+    lastAttemptAt: result.lastAttemptAt,
+    deliveredAt: result.deliveredAt,
+    lastError: result.lastError ?? null,
+  });
+
+  return result;
+}
+
+/**
+ * Records a webhook event into the outbox for asynchronous processing.
+ * This should be called within the same database transaction as the business operation.
+ */
+export async function enqueueTransactionWebhook(
+  transactionId: string,
+  event: WebhookEvent,
+  dependencies: {
+    transactionModel: WebhookTransactionModel;
+    outboxModel: WebhookOutboxModel;
+    webhookService?: WebhookService;
+    useFlatPayload?: boolean;
+  },
+): Promise<string | null> {
+  const webhookService = dependencies.webhookService ?? new WebhookService();
+  const transaction = await dependencies.transactionModel.findById(transactionId);
+
+  if (!transaction) {
+    return null;
+  }
+
+  const payload = dependencies.useFlatPayload
+    ? webhookService.buildFlatPayload(event, transaction)
+    : webhookService.buildPayload(event, transaction);
+
+  const entryId = await dependencies.outboxModel.insert({
+    eventType: event,
+    payload,
+    status: "pending",
+    attempts: 0,
+    maxAttempts: 5,
+    nextAttemptAt: new Date(),
+  });
+
+  return entryId;
+}
+
+export async function notifyFlatTransactionWebhook(
+  transactionId: string,
+  event: WebhookEvent,
+  dependencies: {
+    transactionModel: WebhookTransactionModel;
+    webhookService?: WebhookService;
+    logger?: WebhookLogger;
+  },
+): Promise<WebhookDeliveryResult | null> {
+  const webhookService =
+    dependencies.webhookService ?? new WebhookService();
+  const logger = dependencies.logger ?? console;
+  const transaction = await dependencies.transactionModel.findById(transactionId);
+
+  if (!transaction) {
+    logger.warn(
+      `[webhook] skipped flat event=${event} transactionId=${transactionId}: transaction not found`,
+    );
+    return null;
+  }
+
+  const result = await webhookService.sendFlatTransactionEvent(event, transaction);
 
   await dependencies.transactionModel.updateWebhookDelivery(transactionId, {
     status: result.status,
