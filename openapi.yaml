@@ -1,3 +1,14 @@
+# LEGACY — this file is no longer the source of truth.
+# API docs are now generated at runtime from Zod schemas in src/openapi/schemas/.
+# See /docs (dev only) or run the server and visit http://localhost:<PORT>/docs.
+# This file is kept only for reference and may be removed in a future cleanup.
+#
+# TODO: Point the SDK generator at the live spec instead of this file.
+#   Current:  openapi-generator-cli generate -i openapi.yaml ...
+#   Target:   start the dev server, then use -i http://localhost:<PORT>/docs/openapi.json
+#   Once that's done this file can be deleted and sdk:generate will always
+#   reflect the Zod schemas without any manual sync step.
+
 openapi: 3.0.3
 info:
   title: Mobile Money Bridge API
