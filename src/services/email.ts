@@ -17,6 +17,12 @@ export interface EmailOptions {
   to: string;
   templateId: string;
   dynamicTemplateData: Record<string, any>;
+  attachments?: Array<{
+    content: string;
+    filename: string;
+    type: string;
+    disposition: string;
+  }>;
 }
 
 export class EmailService {
@@ -39,7 +45,10 @@ export class EmailService {
     try {
       await sgMail.send({
         from: process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>',
-        ...options
+        to: options.to,
+        templateId: options.templateId,
+        dynamicTemplateData: options.dynamicTemplateData,
+        attachments: options.attachments,
       });
     } catch (error) {
       console.error("Email delivery failed:", error);

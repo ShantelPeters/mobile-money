@@ -62,6 +62,11 @@ export const env = cleanEnv(process.env, {
     default: "mobile-money",
     desc: "PagerDuty deduplication key prefix for incident grouping",
   }),
+  ADMIN_API_KEY: str({
+    default: "",
+    desc: "Admin API key for internal tooling",
+    example: "admin-secret-key",
+  }),
   APQ_TTL_SECONDS: str({
     default: "86400",
     desc: "TTL in seconds for Automatic Persisted Query entries in Redis (default: 86400 = 24h)",

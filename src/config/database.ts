@@ -132,11 +132,11 @@ class SlowQueryPool extends Pool {
  * (INSERT, UPDATE, DELETE) and read operations when no replica is available.
  */
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-});
+    connectionString: process.env.DATABASE_URL,
+    max: 1000,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 500,
+  });
 
 // Wrap query for slow-query logging while preserving Pool typings.
 const originalPoolQuery = pool.query.bind(pool);
@@ -183,15 +183,15 @@ const replicaUrls: string[] = process.env.READ_REPLICA_URL
   : [];
 
 // Build an individual Pool for each replica URL
-const replicaPools: Pool[] = replicaUrls.map(
-  (url) =>
-    new Pool({
-      connectionString: url,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-    }),
-);
+  const replicaPools: Pool[] = replicaUrls.map(
+    (url) =>
+      new Pool({
+        connectionString: url,
+        max: 50,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 500,
+      }),
+  );
 
 // Track which replica to use next for round-robin load balancing
 let replicaIndex = 0;
@@ -242,6 +242,7 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
 /**
  * Execute a write SQL query (INSERT / UPDATE / DELETE) against the primary pool.
  * All writes now route through PgBouncer via the primary pool connection.
+ * In DR failover mode (DR_DATABASE_URL set) writes go to the promoted replica.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
@@ -250,7 +251,61 @@ export async function queryWrite<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
 ): Promise<import("pg").QueryResult<T>> {
-  return pool.query<T>(text, params);
+  return getWritePool().query<T>(text, params);
+}
+// When DR_DATABASE_URL is set the app is running in failover mode against the
+// promoted DR replica. All writes are redirected there automatically.
+// To activate: set DR_DATABASE_URL=<promoted-replica-url> and restart the app.
+// To deactivate: unset DR_DATABASE_URL and restart.
+
+const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
+
+const drPool: Pool | null = DR_DATABASE_URL
+  ? new Pool({
+      connectionString: DR_DATABASE_URL,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    })
+  : null;
+
+if (drPool) {
+  console.warn(
+    "[DR] DR_DATABASE_URL is set — all writes are routed to the DR replica. " +
+    "Ensure the replica has been promoted before accepting traffic.",
+  );
+}
+
+/**
+ * Returns true when the application is running in DR failover mode.
+ */
+export function isDRMode(): boolean {
+  return drPool !== null;
+}
+
+/**
+ * Health-check the DR pool. Returns null when DR mode is not active.
+ */
+export async function checkDRHealth(): Promise<{ healthy: boolean; url: string } | null> {
+  if (!drPool || !DR_DATABASE_URL) return null;
+  let client: PoolClient | null = null;
+  try {
+    client = await drPool.connect();
+    await client.query("SELECT 1");
+    return { healthy: true, url: DR_DATABASE_URL };
+  } catch {
+    return { healthy: false, url: DR_DATABASE_URL };
+  } finally {
+    client?.release();
+  }
+}
+
+/**
+ * Active write pool — returns the DR pool when in failover mode, otherwise primary.
+ * Use this for all write operations so failover is transparent.
+ */
+export function getWritePool(): Pool {
+  return drPool ?? pool;
 }
 
 /**

@@ -18,6 +18,10 @@ import {
 } from "../config/providers";
 import type { TransactionJobData } from "../queue/transactionQueue";
 import { amlService } from "../services/aml";
+    const {
+      before,
+      after,
+    } = req.query;
 import { travelRuleService } from "../compliance/travelRule";
 import {
   CancelTransactionResponse,
@@ -82,6 +86,8 @@ export const transactionSchema = z.object({
     .max(256, { message: "Note cannot exceed 256 characters" })
     .optional(),
 });
+    const before = req.query.before as string | undefined;
+    const after = req.query.after as string | undefined;
 
 export const validateTransaction = (
   req: Request,
@@ -108,6 +114,8 @@ export const getTransactionHistoryHandler = async (
       endDate,
       offset = "0",
       limit = "20",
+      before,
+      after,
       // Advanced Filters
       minAmount,
       maxAmount,
@@ -160,7 +168,41 @@ export const getTransactionHistoryHandler = async (
     };
 
     // Database Queries
-    const [transactions, total] = await Promise.all([
+    // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.
+    let transactions = [] as any[];
+    let total = 0 as number | undefined;
+
+    if (before || after) {
+      const rows = await transactionModel.list(
+        limitNum + 1,
+        offsetNum,
+        startDate as string | undefined,
+        endDate as string | undefined,
+        filters,
+        { before: before as string | undefined, after: after as string | undefined },
+      );
+
+      // If 'before' was used we fetched ascending results; reverse to keep newest-first
+      if (before) {
+        rows.reverse();
+      }
+
+      const hasMore = rows.length > limitNum;
+      transactions = rows.slice(0, limitNum);
+
+      return res.json({
+        data: transactions,
+        pagination: {
+          limit: limitNum,
+          before: transactions.length ? Buffer.from(`${transactions[0].createdAt.toISOString()}|${transactions[0].id}`).toString('base64') : null,
+          after: transactions.length ? Buffer.from(`${transactions[transactions.length - 1].createdAt.toISOString()}|${transactions[transactions.length - 1].id}`).toString('base64') : null,
+          hasMore,
+        },
+      });
+    }
+
+    // Legacy offset-based pagination
+    [transactions, total] = await Promise.all([
       transactionModel.list(
         limitNum,
         offsetNum,
@@ -173,7 +215,7 @@ export const getTransactionHistoryHandler = async (
         endDate as string | undefined,
         filters,
       ),
-    ]);
+    ] as const);
 
     // Response
     return res.json({

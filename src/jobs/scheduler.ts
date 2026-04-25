@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { runAccountMergeJob } from "./accountMerge";
 import { runCleanupJob } from "./cleanupJob";
+import { runMonthlyInvoiceJob } from "./invoiceJob";
 import { runReportJob } from "./reportJob";
 import { runStatusCheckJob } from "./statusCheckJob";
 import { runDisputeSlaJob } from "./disputeSlaJob";
@@ -77,22 +78,10 @@ const JOBS: JobConfig[] = [
     handler: runProviderHealthCheckJob,
   },
   {
-    name: "kyc-tier-upgrade",
-    // Every hour - flags users at 80% of their KYC daily limit and notifies them
-    schedule: process.env.KYC_TIER_UPGRADE_CRON || "0 * * * *",
-    handler: runKycTierUpgradeJob,
-  },
-  {
-    name: "liquidity-rebalance",
-    // Every 15 minutes - auto-transfers between providers when one runs low
-    schedule: process.env.LIQUIDITY_REBALANCE_CRON || "*/15 * * * *",
-    handler: runLiquidityRebalanceJob,
-  },
-  {
-    name: "cross-chain-monitor",
-    // Every 5 minutes - tracks asset balances across Stellar and mobile money providers
-    schedule: process.env.CROSS_CHAIN_MONITOR_CRON || "*/5 * * * *",
-    handler: runCrossChainMonitorJob,
+    name: "monthly-invoice",
+    // 1st of every month at midnight
+    schedule: "0 0 1 * *",
+    handler: runMonthlyInvoiceJob,
   },
 ];
 

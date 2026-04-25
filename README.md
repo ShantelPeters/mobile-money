@@ -676,6 +676,49 @@ npm run migrate:up
 npm test -- --clearCache
 ```
 
+## 🚨 Error Handling
+
+The Mobile Money Bridge uses standardized error codes for consistent error handling across the API. All errors follow a consistent format with specific error codes that map to appropriate HTTP status codes.
+
+### Error Code Format
+
+Error codes are string constants organized by category:
+- **Validation errors (4000-4099)** - HTTP 400 (e.g., INVALID_INPUT, MISSING_FIELD)
+- **Authentication errors (4010-4019)** - HTTP 401 (e.g., UNAUTHORIZED, INVALID_CREDENTIALS)
+- **Authorization errors (4030-4039)** - HTTP 403 (e.g., FORBIDDEN, INSUFFICIENT_PERMISSIONS)
+- **Resource errors (4040-4049)** - HTTP 404 (e.g., NOT_FOUND, TRANSACTION_NOT_FOUND)
+- **Conflict errors (4090-4099)** - HTTP 409 (e.g., CONFLICT, DUPLICATE_REQUEST)
+- **Rate limit errors (4290-4299)** - HTTP 429 (e.g., RATE_LIMIT, ACCOUNT_LOCKED)
+- **Server errors (5000+)** - HTTP 500+ (e.g., INTERNAL_ERROR, DATABASE_ERROR)
+
+### Usage Example
+
+```typescript
+import { ERROR_CODES } from './constants/errorCodes';
+
+// Throw an error with a specific code
+throw createError(ERROR_CODES.INVALID_INPUT);
+
+// The error handler will automatically map to the correct HTTP status
+// INVALID_INPUT maps to HTTP 400 Bad Request
+```
+
+### Error Code Reference
+
+See [src/constants/errorCodes.ts](../src/constants/errorCodes.ts) for the complete list of error codes and their descriptions.
+
+### HTTP Status Mapping
+
+The `getHttpStatus` function maps error codes to HTTP status codes:
+- 400 Bad Request: Validation/input errors
+- 401 Unauthorized: Authentication errors
+- 403 Forbidden: Authorization/permission errors
+- 404 Not Found: Resource not found errors
+- 409 Conflict: State/conflict errors
+- 429 Too Many Requests: Rate limit/quota exceeded
+- 500 Internal Server Error: Server/database errors
+- 502 Bad Gateway: External provider errors
+
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

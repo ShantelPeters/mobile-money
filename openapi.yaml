@@ -71,6 +71,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/TransactionDetail'
 
+  /v1/transactions:
+    get:
+      summary: List transactions (supports cursor and offset pagination)
+      operationId: listTransactions
+      tags:
+        - Transactions
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: before
+          in: query
+          description: >-
+            Cursor to fetch records newer than the cursor. Keyset cursor encoded as
+            base64("<createdAt ISO 8601>|<id>"). Use with `limit` to page backwards.
+          schema:
+            type: string
+        - name: after
+          in: query
+          description: >-
+            Cursor to fetch records older than the cursor. Keyset cursor encoded as
+            base64("<createdAt ISO 8601>|<id>"). Use with `limit` to page forwards.
+          schema:
+            type: string
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Paginated transaction list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TransactionDetail'
+                  pagination:
+                    type: object
+                    properties:
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                      before:
+                        type: string
+                      after:
+                        type: string
+                      hasMore:
+                        type: boolean
+
 components:
   securitySchemes:
     bearerAuth:
