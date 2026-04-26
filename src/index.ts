@@ -1,6 +1,9 @@
 // Initialize centralized configuration first
 import './config/init';
 
+// Extend Zod with .openapi() — must run before any Zod schema is imported.
+import './openapi/registry';
+
 import "./tracer";
 import path from "path";
 import express, { NextFunction, Request, Response } from "express";
@@ -66,6 +69,7 @@ import {
 import { requireAuth } from "./middleware/auth";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
+import { readReplicaRoutingMiddleware } from "./middleware/readReplicaRouting";
 import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
@@ -85,6 +89,7 @@ import tomlRouter from "./routes/toml";
 import feesRouter from "./routes/fees";
 import feeStrategiesRouter from "./routes/feeStrategies";
 import crossChainRouter from "./routes/crossChain";
+import { docsRouter } from "./routes/docs";
 
 // 1. Import Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -165,6 +170,7 @@ app.use(
 // app.use(rateLimitMiddleware);
 app.use(responseTime);
 app.use(requestId);
+app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -386,6 +392,9 @@ app.use("/sep24", sep24Router);
 app.use("/sep38", sep38Router);
 app.use("/sep12", createSep12Router(pool));
 app.use("/.well-known/stellar.toml", tomlRouter);
+
+// API documentation — development only (404 in production)
+app.use("/docs", docsRouter);
 
 // Prometheus Metrics Scraper Endpoint
 app.get("/metrics", async (req: Request, res: Response) => {
