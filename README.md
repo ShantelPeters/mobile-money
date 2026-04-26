@@ -220,7 +220,52 @@ npm run test:load:transactions
 npm run test:mutation
 ```
 
-## 📚 API Documentation
+## API Documentation
+
+### Interactive docs (Swagger UI)
+
+The API spec is generated at runtime directly from the Zod validation schemas — there is no manually maintained YAML or JSON file to keep in sync.
+
+**Accessing the docs locally**
+
+1. Start the server in development mode:
+   ```bash
+   npm run dev
+   ```
+2. Open your browser at:
+   ```
+   http://localhost:3000/docs
+   ```
+   Swagger UI loads with the full spec, including request/response shapes, examples, and a "Try it out" button for every endpoint.
+
+3. The raw OpenAPI 3.0 JSON is also available at:
+   ```
+   http://localhost:3000/docs/openapi.json
+   ```
+
+**Docs are not available in production** — both `/docs` and `/docs/openapi.json` return `404` when `NODE_ENV !== 'development'`.
+
+### How the spec stays in sync
+
+The source of truth is **`src/openapi/schemas/`**, not `openapi.yaml`.
+
+| File / folder | Purpose |
+|---|---|
+| `src/openapi/registry.ts` | Calls `extendZodWithOpenApi(z)` once; exports the shared registry |
+| `src/openapi/schemas/*.ts` | One file per domain — Zod schemas annotated with `.openapi({ description, example })` |
+| `src/openapi/paths/*.ts` | Route registrations (`registry.registerPath(...)`) per domain |
+| `src/openapi/generator.ts` | Assembles the spec via `OpenApiGeneratorV3` on every server start |
+| `src/routes/docs.ts` | Mounts Swagger UI and the JSON endpoint, dev-only |
+
+**To update the docs:** edit or add a schema in `src/openapi/schemas/`, then restart the server (`npm run dev` uses `tsx watch` so it restarts automatically). The change appears in `/docs` immediately — no manual sync step.
+
+> `openapi.yaml` in the repo root is a legacy file kept only for the SDK generator script (`npm run sdk:generate`). It is no longer the source of truth and will be removed in a future cleanup.
+>
+> **Backlog:** point `sdk:generate` at `http://localhost:3000/docs/openapi.json` instead of `openapi.yaml`. The dev server would need to be running during SDK generation, but it would mean the SDK always reflects the live Zod schemas with no manual sync. Once that's done, `openapi.yaml` can be deleted entirely.
+
+---
+
+## 📚 API Reference
 
 ### Base URL
 
