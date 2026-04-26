@@ -22,7 +22,7 @@ import { amlService } from "../services/aml";
       before,
       after,
     } = req.query;
-import { travelRuleService } from "../compliance/travelRule";
+import { twoFactorWithdrawalService } from "../services/twoFactorWithdrawalService";
 import {
   CancelTransactionResponse,
   LimitExceededErrorResponse,
@@ -85,6 +85,9 @@ export const transactionSchema = z.object({
     .string()
     .max(256, { message: "Note cannot exceed 256 characters" })
     .optional(),
+  // Optional 2FA fields for withdrawals
+  twoFactorToken: z.string().optional(),
+  backupCode: z.string().optional(),
 });
     const before = req.query.before as string | undefined;
     const after = req.query.after as string | undefined;
@@ -453,6 +456,37 @@ async function processTransactionRequest(
       };
 
       return res.status(400).json(body);
+    }
+
+    // Check mandatory 2FA for withdrawals
+    if (type === "withdraw") {
+      const requires2FA = await twoFactorWithdrawalService.requires2FAForWithdrawal(userId);
+      if (requires2FA) {
+        const twoFactorToken = req.body.twoFactorToken || req.headers['x-2fa-token'] as string;
+        const backupCode = req.body.backupCode;
+
+        if (!twoFactorToken && !backupCode) {
+          return res.status(400).json({
+            error: "2FA verification required for withdrawal",
+            code: "TWO_FACTOR_REQUIRED",
+            message: "This account requires 2FA verification for all withdrawals. Please provide a TOTP token or backup code."
+          });
+        }
+
+        const verificationResult = await twoFactorWithdrawalService.verifyWithdrawal2FA({
+          userId,
+          token: twoFactorToken,
+          backupCode
+        });
+
+        if (!verificationResult.success) {
+          return res.status(401).json({
+            error: "2FA verification failed",
+            code: "TWO_FACTOR_INVALID",
+            message: verificationResult.error || "Invalid 2FA token or backup code"
+          });
+        }
+      }
     }
 
     const createOrReuse = async (): Promise<CreateTransactionResponse> => {
