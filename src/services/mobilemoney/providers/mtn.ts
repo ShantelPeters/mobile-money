@@ -1,5 +1,6 @@
 import axios from "axios";
 import { randomUUID } from "crypto";
+import logger from "../../../utils/logger";
 
 interface MtnBalanceResponse {
   availableBalance?: string | number;
@@ -83,7 +84,11 @@ export class MTNProvider {
     }
   }
 
-  async requestPayment(phoneNumber: string, amount: string) {
+  async requestPayment(phoneNumber: string, amount: string, requestId?: string) {
+    const log = requestId ? logger.child({ requestId }) : logger;
+    log.info({ phoneNumber, amount }, "MTN: Requesting payment");
+    const startTime = Date.now();
+
     try {
       const response = await axios.post(
         `${this.baseUrl}/collection/v1_0/requesttopay`,
@@ -103,13 +108,32 @@ export class MTNProvider {
         },
       );
 
-      return { success: true, data: response.data };
-    } catch (error) {
-      return { success: false, error };
+      const duration = Date.now() - startTime;
+      log.info({ duration, status: response.status }, "MTN: Payment request successful");
+
+      return { 
+        success: true, 
+        data: response.data,
+        providerResponseTimeMs: duration
+      };
+    } catch (error: any) {
+      const duration = Date.now() - startTime;
+      log.error({ 
+        duration, 
+        error: error.message,
+        response: error.response?.data
+      }, "MTN: Payment request failed");
+      return { 
+        success: false, 
+        error,
+        providerResponseTimeMs: duration
+      };
     }
   }
 
-  async sendPayout(_phoneNumber: string, _amount: string) {
+  async sendPayout(phoneNumber: string, amount: string, requestId?: string) {
+    const log = requestId ? logger.child({ requestId }) : logger;
+    log.info({ phoneNumber, amount }, "MTN: Sending payout");
     return { success: true };
   }
 

@@ -1,6 +1,7 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from "axios";
 import * as fs from "fs";
 import * as path from "path";
+import logger from "../../../utils/logger";
 
 type OrangeOperation = "payment" | "payout";
 type OrangeMode = "web" | "direct" | "proxy";
@@ -115,15 +116,17 @@ export class OrangeProvider {
   async requestPayment(
     phoneNumber: string,
     amount: string | number,
+    requestId?: string,
   ): Promise<OrangeResult> {
-    return this.executeOperation("payment", phoneNumber, String(amount));
+    return this.executeOperation("payment", phoneNumber, String(amount), requestId);
   }
 
   async sendPayout(
     phoneNumber: string,
     amount: string | number,
+    requestId?: string,
   ): Promise<OrangeResult> {
-    return this.executeOperation("payout", phoneNumber, String(amount));
+    return this.executeOperation("payout", phoneNumber, String(amount), requestId);
   }
 
   async checkStatus(reference: string): Promise<OrangeResult> {
@@ -317,37 +320,48 @@ export class OrangeProvider {
     operation: OrangeOperation,
     phoneNumber: string,
     amount: string,
+    requestId?: string,
   ): Promise<OrangeResult> {
+    const log = requestId ? logger.child({ requestId }) : logger;
+    log.info({ phoneNumber, amount, operation, mode: this.mode }, "Orange: Executing operation");
+    const startTime = Date.now();
     try {
-      if (this.mode === "proxy") {
-        return await this.executeViaProxy(operation, phoneNumber, amount);
-      }
+      const response = await (async () => {
+        if (this.mode === "proxy") {
+          return await this.executeViaProxy(operation, phoneNumber, amount);
+        }
 
-      if (this.mode === "direct") {
-        return await this.executeViaDirectApi(operation, phoneNumber, amount);
-      }
+        if (this.mode === "direct") {
+          return await this.executeViaDirectApi(operation, phoneNumber, amount);
+        }
 
-      this.assertWebConfig();
-      const reference = this.createReference(operation);
-      const response = await this.requestWithSession(
-        {
-          method: "POST",
-          url:
-            operation === "payment"
-              ? this.config.paymentPath
-              : this.config.payoutPath,
-          data: {
-            amount,
-            currency: this.config.currency,
-            msisdn: phoneNumber,
-            reference,
+        this.assertWebConfig();
+        const reference = this.createReference(operation);
+        const resp = await this.requestWithSession(
+          {
+            method: "POST",
+            url:
+              operation === "payment"
+                ? this.config.paymentPath
+                : this.config.payoutPath,
+            data: {
+              amount,
+              currency: this.config.currency,
+              msisdn: phoneNumber,
+              reference,
+            },
           },
-        },
-        operation,
-      );
+          operation,
+        );
+        return resp;
+      })();
 
-      return this.toProviderResult(response, reference);
-    } catch (error) {
+      const duration = Date.now() - startTime;
+      log.info({ duration, success: response.success !== false }, "Orange: Operation completed");
+      return response as OrangeResult;
+    } catch (error: any) {
+      const duration = Date.now() - startTime;
+      log.error({ duration, error: error.message }, "Orange: Operation failed");
       return { success: false, error };
     }
   }

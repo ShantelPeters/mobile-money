@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosError } from "axios";
+import logger from "../../../utils/logger";
 
 // This interface is now used in the methods below
 interface AirtelResponse {
@@ -42,16 +43,6 @@ export class AirtelService {
       return this.token;
     }
 
-    const response = await this.client.post("/auth/oauth2/token", null, {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.AIRTEL_API_KEY}:${process.env.AIRTEL_API_SECRET}`,
-          ).toString("base64"),
-      },
-    });
     try {
       const response = await this.client.post("/auth/oauth2/token", null, {
         headers: {
@@ -69,7 +60,7 @@ export class AirtelService {
 
       return this.token!;
     } catch (error) {
-      console.error("Airtel auth failed", error);
+      logger.error({ error }, "Airtel auth failed");
       throw new Error("Airtel authentication failed");
     }
   }
@@ -94,7 +85,7 @@ export class AirtelService {
             (err as { response: { status: number } }).response.status >= 500) ||
           (err as { code?: string }).code === "ECONNABORTED"
         ) {
-          console.warn(`Retrying Airtel request (${i + 1})`);
+          logger.warn({ attempt: i + 1 }, "Retrying Airtel request");
           await new Promise((res) => setTimeout(res, 1000 * (i + 1)));
           continue;
         }
@@ -103,7 +94,7 @@ export class AirtelService {
       }
     }
 
-    throw lastError;
+    throw lastError!;
   }
 
   /**
@@ -111,7 +102,11 @@ export class AirtelService {
    * REQUEST PAYMENT (COLLECTION)
    * =========================
    */
-  async requestPayment(phoneNumber: string, amount: string) {
+  async requestPayment(phoneNumber: string, amount: string, requestId?: string) {
+    const log = requestId ? logger.child({ requestId }) : logger;
+    log.info({ phoneNumber, amount }, "Airtel: Requesting payment");
+    const startTime = Date.now();
+
     const token = await this.authenticate();
     const reference = `AIRTEL-${Date.now()}`;
 
@@ -143,9 +138,26 @@ export class AirtelService {
           },
         );
 
-        return { success: true, data: response.data };
-      } catch (error) {
-        return { success: false, error };
+        const duration = Date.now() - startTime;
+        log.info({ duration, status: response.status }, "Airtel: Payment request successful");
+
+        return { 
+          success: true, 
+          data: response.data,
+          providerResponseTimeMs: duration
+        };
+      } catch (error: any) {
+        const duration = Date.now() - startTime;
+        log.error({ 
+          duration, 
+          error: error.message,
+          response: error.response?.data
+        }, "Airtel: Payment request failed");
+        return { 
+          success: false, 
+          error,
+          providerResponseTimeMs: duration
+        };
       }
     });
   }
@@ -245,7 +257,11 @@ export class AirtelService {
    * PAYOUT (DISBURSEMENT)
    * =========================
    */
-  async sendPayout(phoneNumber: string, amount: string) {
+  async sendPayout(phoneNumber: string, amount: string, requestId?: string) {
+    const log = requestId ? logger.child({ requestId }) : logger;
+    log.info({ phoneNumber, amount }, "Airtel: Sending payout");
+    const startTime = Date.now();
+
     const token = await this.authenticate();
     const reference = `AIRTEL-PAYOUT-${Date.now()}`;
 
@@ -273,9 +289,26 @@ export class AirtelService {
           },
         );
 
-        return { success: true, data: response.data };
-      } catch (error) {
-        return { success: false, error };
+        const duration = Date.now() - startTime;
+        log.info({ duration, status: response.status }, "Airtel: Payout successful");
+
+        return { 
+          success: true, 
+          data: response.data,
+          providerResponseTimeMs: duration
+        };
+      } catch (error: any) {
+        const duration = Date.now() - startTime;
+        log.error({ 
+          duration, 
+          error: error.message,
+          response: error.response?.data
+        }, "Airtel: Payout failed");
+        return { 
+          success: false, 
+          error,
+          providerResponseTimeMs: duration
+        };
       }
     });
   }

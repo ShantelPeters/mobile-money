@@ -503,6 +503,7 @@ async function processTransactionRequest(
                 phoneNumber,
                 provider,
                 stellarAddress,
+                requestId: (req as any).id,
               },
               {
                 jobId: transaction.id,

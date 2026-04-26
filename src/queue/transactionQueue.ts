@@ -12,6 +12,7 @@ export interface TransactionJobData {
   phoneNumber: string;
   provider: string;
   stellarAddress: string;
+  requestId?: string;
 }
 
 export interface TransactionJobResult {
