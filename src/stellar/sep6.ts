@@ -45,7 +45,8 @@ export const createSep6Router = (db: Pool): Router => {
           min_amount: asset.min_amount,
           max_amount: asset.max_amount,
           fields: {
-            email_address: { description: "Email address for receipt", optional: true },
+            email_address: { description: "Email address for receipt", optional: true }
+            // TODO: Add SEP-9 fields if KYC is supported directly here
           },
         };
       }
