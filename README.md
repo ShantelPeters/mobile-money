@@ -694,6 +694,8 @@ spec:
 
 ## 🐛 Troubleshooting
 
+For a detailed list of error codes, their meanings, and how to resolve them, see our [Troubleshooting Guide](TROUBLESHOOTING.md).
+
 ### Common Issues
 
 **Database connection fails**
