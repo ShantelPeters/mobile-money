@@ -308,6 +308,110 @@ var MobileMoneyService = /** @class */ (function () {
         }
         return stats;
     };
+    MobileMoneyService.prototype.sendBatchPayout = function (provider, items) {
+        return __awaiter(this, void 0, void 0, function () {
+            var providerKey, MAX_BATCH_SIZE, providerInstance, results, _i, items_1, item, result_1, startTime_1, result, responseTimeMs, successCount, failureCount, i, i, error_2, errorMessage;
+            var _this = this;
+            return __generator(this, function (_a) {
+                switch (_a.label) {
+                    case 0:
+                        providerKey = provider.toLowerCase();
+                        MAX_BATCH_SIZE = 50;
+                        if (items.length === 0) {
+                            return [2 /*return*/, { success: true, results: [] }];
+                        }
+                        if (items.length > MAX_BATCH_SIZE) {
+                            return [2 /*return*/, {
+                                    success: false,
+                                    results: items.map(function (item) { return ({
+                                        referenceId: item.referenceId,
+                                        success: false,
+                                        error: "Batch size exceeds maximum of ".concat(MAX_BATCH_SIZE),
+                                    }); }),
+                                    error: new Error("Batch size ".concat(items.length, " exceeds maximum of ").concat(MAX_BATCH_SIZE)),
+                                }];
+                        }
+                        _a.label = 1;
+                    case 1:
+                        _a.trys.push([1, 6, , 7]);
+                        return [4 /*yield*/, this.getProviderOrThrow(providerKey)];
+                    case 2:
+                        providerInstance = _a.sent();
+                        if (!providerInstance.sendBatchPayout) {
+                            // Fallback: process individually if batch not supported
+                            console.warn("Provider '".concat(providerKey, "' does not support batch payout, falling back to individual processing"));
+                            results = [];
+                            _i = 0, items_1 = items;
+                            _a.label = 3;
+                    case 3:
+                        if (!(_i < items_1.length)) return [3 /*break*/, 5];
+                        item = items_1[_i];
+                        return [4 /*yield*/, this.sendPayout(providerKey, item.phoneNumber, item.amount)];
+                    case 4:
+                        result_1 = _a.sent();
+                        results.push({
+                            referenceId: item.referenceId,
+                            success: true,
+                            providerReference: result_1.data ? String(result_1.data.referenceId || "") : undefined,
+                        });
+                        _i++;
+                        return [3 /*break*/, 3];
+                    case 5:
+                        return [2 /*return*/, { success: results.some(function (r) { return r.success; }), results: results }];
+                    case 6:
+                        error_2 = _a.sent();
+                        errorMessage = error_2 instanceof Error ? error_2.message : "Batch payout failed";
+                        metrics_1.transactionErrorsTotal.inc({
+                            type: "payout",
+                            provider: providerKey,
+                            error_type: "batch_payout_error",
+                        });
+                        return [2 /*return*/, {
+                                success: false,
+                                results: items.map(function (item) { return ({
+                                    referenceId: item.referenceId,
+                                    success: false,
+                                    error: errorMessage,
+                                }); }),
+                                error: error_2,
+                            }];
+                    case 7:
+                        startTime_1 = Date.now();
+                        return [4 /*yield*/, (0, circuitBreaker_1.executeWithCircuitBreaker)({
+                                provider: providerKey,
+                                operation: "sendBatchPayout",
+                                execute: function () { return __awaiter(_this, void 0, void 0, function () {
+                                    return __generator(this, function (_a) {
+                                        return [2 /*return*/, providerInstance.sendBatchPayout(items)];
+                                    });
+                                }); },
+                            })];
+                    case 8:
+                        result = _a.sent();
+                        responseTimeMs = Date.now() - startTime_1;
+                        successCount = result.results ? result.results.filter(function (r) { return r.success; }).length : 0;
+                        failureCount = result.results ? result.results.filter(function (r) { return !r.success; }).length : 0;
+                        for (i = 0; i < successCount; i++) {
+                            metrics_1.transactionTotal.inc({
+                                type: "payout",
+                                provider: providerKey,
+                                status: "success",
+                            });
+                        }
+                        for (i = 0; i < failureCount; i++) {
+                            metrics_1.transactionTotal.inc({
+                                type: "payout",
+                                provider: providerKey,
+                                status: "failure",
+                            });
+                        }
+                        console.log("[BatchPayout] Provider=".concat(providerKey, " processed ").concat(items.length, " items: ").concat(successCount, " success, ").concat(failureCount, " failed (").concat(responseTimeMs, "ms)"));
+                        return [2 /*return*/, result];
+                    case 9: return [2 /*return*/];
+                }
+            });
+        });
+    };
     return MobileMoneyService;
 }());
 exports.MobileMoneyService = MobileMoneyService;

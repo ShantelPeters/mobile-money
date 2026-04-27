@@ -96,6 +96,37 @@ export const healthCheckResponseTimeSeconds = new Histogram({
   registers: [register],
 });
 
+// Batch Payout Metrics
+export const batchPayoutTotal = new Counter({
+  name: "batch_payout_total",
+  help: "Total number of batch payout operations",
+  labelNames: ["provider", "status"],
+  registers: [register],
+});
+
+export const batchPayoutItemsTotal = new Counter({
+  name: "batch_payout_items_total",
+  help: "Total number of items processed in batch payouts",
+  labelNames: ["provider", "status"],
+  registers: [register],
+});
+
+export const batchPayoutDurationSeconds = new Histogram({
+  name: "batch_payout_duration_seconds",
+  help: "Duration of batch payout operations in seconds",
+  labelNames: ["provider"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
+
+export const batchPayoutSize = new Histogram({
+  name: "batch_payout_size",
+  help: "Number of items in each batch payout",
+  labelNames: ["provider"],
+  buckets: [1, 5, 10, 20, 30, 40, 50],
+  registers: [register],
+});
+
 // Connection Metrics
 export const activeConnections = new Gauge({
   name: "active_connections",

@@ -13,6 +13,19 @@ export type ProviderTransactionStatus =
   | "pending"
   | "unknown";
 
+export interface BatchPayoutItem {
+  referenceId: string;
+  phoneNumber: string;
+  amount: string;
+}
+
+export interface BatchPayoutResult {
+  referenceId: string;
+  success: boolean;
+  error?: string;
+  providerReference?: string;
+}
+
 export interface MobileMoneyProvider {
   requestPayment(
     phoneNumber: string,
@@ -22,6 +35,9 @@ export interface MobileMoneyProvider {
     phoneNumber: string,
     amount: string,
   ): Promise<{ success: boolean; data?: unknown; error?: unknown }>;
+  sendBatchPayout?(
+    items: BatchPayoutItem[],
+  ): Promise<{ success: boolean; results: BatchPayoutResult[]; error?: unknown }>;
   getTransactionStatus(
     referenceId: string,
   ): Promise<{ status: ProviderTransactionStatus }>;

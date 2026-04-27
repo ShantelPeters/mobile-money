@@ -219,4 +219,45 @@ export class TransactionModel {
 
     return res.rows[0];
   }
+
+  /**
+   * Find pending transactions by status, provider, and type.
+   * Used by batch payout worker to group transactions for efficient processing.
+   */
+  async findByStatusAndProvider(
+    status: TransactionStatus,
+    provider: string,
+    type: "deposit" | "withdraw",
+    limit = 50,
+  ) {
+    const capped = Math.min(Math.max(limit, 1), 50);
+
+    const result = await queryRead(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+        FROM transactions
+        WHERE status = $1
+          AND provider = $2
+          AND type = $3
+        ORDER BY created_at ASC
+        LIMIT $4`,
+      [status, provider.toLowerCase(), type, capped],
+    );
+
+    return result.rows.map(mapTransactionRow).filter((t: any) => t !== null);
+  }
+
+  async patchMetadata(id: string, patch: Record<string, unknown>) {
+    validateMetadata(patch);
+
+    const result = await queryWrite(
+      `UPDATE transactions
+        SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
+      [JSON.stringify(patch), id],
+    );
+
+    return mapTransactionRow(result.rows[0]);
+  }
 }
