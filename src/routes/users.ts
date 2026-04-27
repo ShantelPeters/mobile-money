@@ -3,6 +3,11 @@ import { requireAuth } from "../middleware/auth";
 import { optimizeProfileImage, upload } from "../middleware/upload";
 import { uploadToS3 } from "../services/s3Upload";
 import { pool } from "../config/database";
+import {
+  getWithdrawal2FASettings,
+  updateMandatory2FAWithdrawals,
+  verifyWithdrawal2FA
+} from "../controllers/twoFactorWithdrawalController";
 
 const router = Router();
 
@@ -50,5 +55,10 @@ router.post(
     }
   },
 );
+
+// 2FA Withdrawal Settings Routes
+router.get("/2fa/withdrawals", requireAuth, getWithdrawal2FASettings);
+router.put("/2fa/withdrawals", requireAuth, updateMandatory2FAWithdrawals);
+router.post("/2fa/withdrawals/verify", requireAuth, verifyWithdrawal2FA);
 
 export { router as userRoutes };

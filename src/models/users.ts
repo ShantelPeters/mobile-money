@@ -14,6 +14,7 @@ export interface User {
   createdAt: Date;
   updatedAt: Date;
   smsOptOut?: boolean;
+  mandatory2FAWithdrawals?: boolean;
   // TODO: The `User` type and database table needs to
   // be update with these fields:  is_active: boolean,   deactivated_at:Date`
 }
@@ -37,6 +38,7 @@ export class UserModel {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       smsOptOut: row.sms_opt_out ?? false,
+      mandatory2FAWithdrawals: row.mandatory_2fa_withdrawals ?? false,
     };
   }
 
@@ -151,5 +153,12 @@ export class UserModel {
     `;
     const result = await queryWrite(query, [id]);
     return result.rows[0]?.token_version || 0;
+  }
+
+  async updateMandatory2FAWithdrawals(id: string, enabled: boolean): Promise<void> {
+    await queryWrite(
+      "UPDATE users SET mandatory_2fa_withdrawals = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [enabled, id]
+    );
   }
 }
